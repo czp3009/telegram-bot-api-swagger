@@ -10,7 +10,7 @@ import io.ktor.http.*
 
 private val logger = KotlinLogging.logger {}
 
-class BotApiDocumentFetcher {
+object DocumentFetcher {
     private val client by lazy {
         HttpClient(Curl) {
             engine {
@@ -27,7 +27,5 @@ class BotApiDocumentFetcher {
 
     suspend fun fetch() = client.get(URL).bodyAsText()
 
-    companion object {
-        private const val URL = "https://core.telegram.org/bots/api"
-    }
+    private const val URL = "https://core.telegram.org/bots/api"
 }
