@@ -69,7 +69,7 @@ object DocumentParser {
      */
     private fun isSectionHeader(name: String): Boolean {
         // API objects and methods never contain spaces
-        // If name contains spaces, it's a section header
+        // If the name contains spaces, it's a section header
         return name.contains(' ')
     }
 
@@ -325,15 +325,19 @@ object DocumentParser {
 
         companion object {
             fun parse(typeString: String): Type {
-                val trimmed = typeString.trim()
+                // Normalize special boolean types
+                val normalizedType = when (val trimmed = typeString.trim()) {
+                    "True", "False" -> "Boolean"
+                    else -> trimmed
+                }
 
                 // Count how many "Array of" prefixes exist
                 val arrayOfPattern = Regex("Array of ", RegexOption.IGNORE_CASE)
-                val arrayCount = arrayOfPattern.findAll(trimmed).count()
+                val arrayCount = arrayOfPattern.findAll(normalizedType).count()
 
                 return if (arrayCount > 0) {
                     // Extract the element type (everything after the last "Array of")
-                    val elementType = trimmed.substringAfterLast("Array of ", "").trim()
+                    val elementType = normalizedType.substringAfterLast("Array of ", "").trim()
 
                     if (elementType.isEmpty() || !elementType[0].isUpperCase()) {
                         error("Invalid array element type: '$elementType' in type string: '$typeString'")
@@ -347,10 +351,10 @@ object DocumentParser {
                     currentType
                 } else {
                     // Simple type
-                    if (trimmed.isEmpty()) {
+                    if (normalizedType.isEmpty()) {
                         error("Empty type string")
                     }
-                    Simple(trimmed)
+                    Simple(normalizedType)
                 }
             }
         }

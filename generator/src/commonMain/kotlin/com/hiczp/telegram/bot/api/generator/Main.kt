@@ -12,7 +12,21 @@ fun main() {
         logger.info { "Fetched document" }
         val (methods, objects) = DocumentParser.parse(html)
         logger.info { "Parsed document" }
-        SwaggerGenerator.generate(methods, objects)
+        val swaggerJson = SwaggerGenerator.generate(methods, objects)
         logger.info { "Generated swagger" }
+
+        // Write to the swagger folder
+        val outputDir = "swagger"
+        val outputFile = "$outputDir/telegram-bot-api.json"
+
+        // Create the directory if it doesn't exist
+        if (!fileExists(outputDir)) {
+            createDirectory(outputDir)
+            logger.info { "Created directory: $outputDir" }
+        }
+
+        // Write JSON to the file
+        writeFile(outputFile, swaggerJson)
+        logger.info { "Swagger JSON written to: $outputFile" }
     }
 }
