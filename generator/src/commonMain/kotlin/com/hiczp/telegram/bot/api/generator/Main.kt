@@ -12,8 +12,6 @@ fun main() {
         logger.info { "Fetched document" }
         val (methods, objects) = DocumentParser.parse(html)
         logger.info { "Parsed document" }
-        println(methods)
-        println(objects)
         SwaggerGenerator.generate(methods, objects)
         logger.info { "Generated swagger" }
     }
