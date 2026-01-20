@@ -7,7 +7,7 @@ TAG="v${VERSION}"
 # Check if release exists
 if ! gh release view "$TAG" >/dev/null 2>&1; then
   echo "No release found for $TAG, creating new release"
-  gh release create "$TAG" "$SWAGGER_FILE" --title "$TAG"
+  gh release create "$TAG" "$SWAGGER_FILE" --title "$TAG" --notes "Telegram Bot API Swagger specification v${VERSION}"
   echo "Release $TAG created successfully"
 else
   echo "Release $TAG already exists, no update needed"
