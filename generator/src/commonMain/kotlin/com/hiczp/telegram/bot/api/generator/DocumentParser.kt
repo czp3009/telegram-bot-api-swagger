@@ -120,8 +120,18 @@ object DocumentParser {
         description: String,
         tableElement: Element?
     ): Object {
+        // Check if this is a union type definition
+        val isUnionType = description.contains("can be one of", ignoreCase = true)
+        val unionSubtypes = if (isUnionType) {
+            extractUnionSubtypes(description)
+        } else {
+            emptyList()
+        }
+
         val fields = if (tableElement == null) {
-            logger.warn { "Object $name has no table element, fields will be empty" }
+            if (!isUnionType) {
+                logger.warn { "Object $name has no table element, fields will be empty" }
+            }
             emptyList()
         } else {
             val headerMap = parseTableHeaders(tableElement)
@@ -155,7 +165,26 @@ object DocumentParser {
             }
         }
 
-        return Object(name, description, fields)
+        return Object(name, description, fields, isUnionType, unionSubtypes)
+    }
+
+    private fun extractUnionSubtypes(description: String): List<String> {
+        // Extract subtypes from description like "can be one of: Type1, Type2, Type3"
+        val subtypes = mutableListOf<String>()
+
+        // Match pattern like "can be one of" followed by a list
+        val pattern = Regex("can be one of[:\\s]*", RegexOption.IGNORE_CASE)
+        val afterPattern = description.substringAfter(pattern.find(description)?.value ?: "", "")
+
+        if (afterPattern.isNotEmpty()) {
+            // Extract type names (capitalized words)
+            val typePattern = Regex("\\b([A-Z][a-zA-Z0-9]+)\\b")
+            typePattern.findAll(afterPattern).forEach { match ->
+                subtypes.add(match.groupValues[1])
+            }
+        }
+
+        return subtypes
     }
 
     private fun parseMethod(
@@ -364,6 +393,8 @@ object DocumentParser {
         val name: String,
         val description: String,
         val fields: List<Field>,
+        val isUnionType: Boolean = false,
+        val unionSubtypes: List<String> = emptyList(),
     ) {
         data class Field(
             val name: String,

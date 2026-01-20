@@ -9,8 +9,17 @@ import kotlinx.serialization.json.JsonPrimitive
 private val logger = KotlinLogging.logger {}
 
 object SwaggerGenerator {
+    // Store union type information for reference during schema conversion
+    private val unionTypes = mutableMapOf<String, List<String>>()
+
     fun generate(methods: List<Method>, objects: List<Object>): String {
         logger.info { "Generating OpenAPI specification for ${methods.size} methods and ${objects.size} objects" }
+
+        // Build union type map
+        unionTypes.clear()
+        objects.filter { it.isUnionType }.forEach { obj ->
+            unionTypes[obj.name] = obj.unionSubtypes
+        }
 
         val openApi = OpenAPIV3Model(
             openapi = "3.0.3",
@@ -137,14 +146,26 @@ object SwaggerGenerator {
 
     private fun generateSchemas(objects: List<Object>): Map<String, OpenAPIV3SchemaOrReference> {
         return objects.associate { obj ->
-            obj.name to OpenAPIV3Schema(
-                type = OpenAPIV3Type.OBJECT,
-                description = obj.description.ifEmpty { null },
-                properties = obj.fields.associate { field ->
-                    field.name to convertTypeToSchema(field.type)
-                }.ifEmpty { null },
-                required = obj.fields.filter { it.required }.map { it.name }.ifEmpty { null }
-            )
+            val schema = if (obj.isUnionType) {
+                // For union types, create a schema with oneOf pointing to subtypes
+                OpenAPIV3Schema(
+                    description = obj.description.ifEmpty { null },
+                    oneOf = obj.unionSubtypes.map { subtype ->
+                        OpenAPIV3Reference(ref = Ref("#/components/schemas/$subtype"))
+                    }.ifEmpty { null }
+                )
+            } else {
+                // For regular types, create a normal object schema
+                OpenAPIV3Schema(
+                    type = OpenAPIV3Type.OBJECT,
+                    description = obj.description.ifEmpty { null },
+                    properties = obj.fields.associate { field ->
+                        field.name to convertTypeToSchema(field.type)
+                    }.ifEmpty { null },
+                    required = obj.fields.filter { it.required }.map { it.name }.ifEmpty { null }
+                )
+            }
+            obj.name to schema
         }
     }
 
@@ -204,7 +225,11 @@ object SwaggerGenerator {
             "Integer", "Int" -> OpenAPIV3Schema(type = OpenAPIV3Type.INTEGER, format = "int64")
             "Boolean" -> OpenAPIV3Schema(type = OpenAPIV3Type.BOOLEAN)
             "Float", "Double" -> OpenAPIV3Schema(type = OpenAPIV3Type.NUMBER, format = "double")
-            else -> OpenAPIV3Reference(ref = Ref("#/components/schemas/$typeName"))
+            else -> {
+                // Always return a reference for custom types (including union types)
+                // The union type definition itself will have oneOf in the schemas section
+                OpenAPIV3Reference(ref = Ref("#/components/schemas/$typeName"))
+            }
         }
     }
 }
