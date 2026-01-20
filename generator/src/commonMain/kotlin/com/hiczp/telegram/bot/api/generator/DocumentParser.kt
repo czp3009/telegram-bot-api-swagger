@@ -13,6 +13,9 @@ object DocumentParser {
     private const val TAG_H4 = "h4"
     private const val TAG_TABLE = "table"
 
+    // Regex pattern for extracting Bot API version
+    private val REGEX_BOT_API_VERSION = Regex("Bot API (\\d+\\.\\d+)", RegexOption.IGNORE_CASE)
+
     // Table header names
     private const val HEADER_FIELD = "field"
     private const val HEADER_PARAMETER = "parameter"
@@ -55,6 +58,38 @@ object DocumentParser {
         val description: String,
         val table: Element?
     )
+
+    /**
+     * Extract the Bot API version from the HTML document.
+     * The version is typically found in the "Recent changes" section in the format "Bot API X.Y".
+     */
+    fun extractVersion(html: String): String {
+        val doc = Ksoup.parse(html)
+        val devPageContent = doc.body().getElementById(CONTENT_CONTAINER)
+        checkNotNull(devPageContent) { "$CONTENT_CONTAINER is null" }
+
+        // Look for the version in the first few paragraphs after "Recent changes"
+        val elements = devPageContent.children()
+        val recentChangesIndex = elements.indexOfFirst {
+            it.tagName() == TAG_H3 && it.text().contains("Recent changes", ignoreCase = true)
+        }
+
+        if (recentChangesIndex != -1) {
+            // Search in the next few elements after "Recent changes"
+            for (i in (recentChangesIndex + 1)..<minOf(recentChangesIndex + 10, elements.size)) {
+                val element = elements[i]
+                val text = element.text()
+                val match = REGEX_BOT_API_VERSION.find(text)
+                if (match != null) {
+                    val version = match.groupValues[1]
+                    logger.info { "Extracted Bot API version: $version" }
+                    return version
+                }
+            }
+        }
+
+        error("Failed to extract Bot API version from document")
+    }
 
     fun parse(html: String): Pair<List<Method>, List<Object>> {
         val devPageContent = Ksoup.parse(html).body().getElementById(CONTENT_CONTAINER)

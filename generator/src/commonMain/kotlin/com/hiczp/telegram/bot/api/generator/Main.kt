@@ -10,9 +10,11 @@ fun main() {
     runBlocking(Dispatchers.Default) {
         val html = DocumentFetcher.fetch()
         logger.info { "Fetched document" }
+        val apiVersion = DocumentParser.extractVersion(html)
+        logger.info { "Extracted API version: $apiVersion" }
         val (methods, objects) = DocumentParser.parse(html)
         logger.info { "Parsed document" }
-        val swaggerJson = SwaggerGenerator.generate(methods, objects, Version.PROJECT_VERSION)
+        val swaggerJson = SwaggerGenerator.generate(methods, objects, apiVersion)
         logger.info { "Generated swagger" }
 
         // Write to the swagger folder

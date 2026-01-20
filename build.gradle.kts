@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "com.hiczp"
-version = "2025.12.31"
+version = "0.0.1"
 
 subprojects {
     group = rootProject.group
