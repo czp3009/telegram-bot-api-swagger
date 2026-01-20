@@ -13,6 +13,44 @@ object DocumentParser {
     private const val TAG_H4 = "h4"
     private const val TAG_TABLE = "table"
 
+    // Table header names
+    private const val HEADER_FIELD = "field"
+    private const val HEADER_PARAMETER = "parameter"
+    private const val HEADER_TYPE = "type"
+    private const val HEADER_REQUIRED = "required"
+    private const val HEADER_DESCRIPTION = "description"
+
+    // Type names
+    private const val TYPE_INPUT_FILE = "InputFile"
+    private const val TYPE_INPUT_MEDIA = "InputMedia"
+    private const val TYPE_ARRAY_OF = "Array of "
+
+    // Regex patterns for return type extraction (compiled once)
+    private val REGEX_RETURNS_TRUE = Regex("returns?\\s+True", RegexOption.IGNORE_CASE)
+    private val REGEX_TRUE_IS_RETURNED = Regex("True\\s+(?:is|on)\\s+(?:returned|success)", RegexOption.IGNORE_CASE)
+    private val REGEX_RETURNS_FALSE = Regex("returns?\\s+False", RegexOption.IGNORE_CASE)
+    private val REGEX_RETURNS_STRING = Regex("returns?\\s+(?:a\\s+)?String", RegexOption.IGNORE_CASE)
+    private val REGEX_STRING_IS_RETURNED = Regex("String\\s+is\\s+returned", RegexOption.IGNORE_CASE)
+    private val REGEX_AS_STRING = Regex("as\\s+(?:a\\s+)?String", RegexOption.IGNORE_CASE)
+    private val REGEX_RETURNS_INTEGER = Regex("returns?\\s+(?:an?\\s+)?Int(?:eger)?", RegexOption.IGNORE_CASE)
+    private val REGEX_INTEGER_IS_RETURNED = Regex("Integer\\s+is\\s+returned", RegexOption.IGNORE_CASE)
+    private val REGEX_RETURNS_NUMBER = Regex("returns?\\s+(?:the\\s+)?number", RegexOption.IGNORE_CASE)
+    private val REGEX_ARRAY_TYPE =
+        Regex("(?:returns?\\s+(?:an?\\s+)?)?((?:$TYPE_ARRAY_OF)+)([A-Z]\\w+)", RegexOption.IGNORE_CASE)
+    private val REGEX_OBJECT_IS_RETURNED =
+        Regex("(?:an?|the)\\s+([A-Z]\\w+)\\s+object\\s+is\\s+returned", RegexOption.IGNORE_CASE)
+    private val REGEX_TYPE_IS_RETURNED =
+        Regex("(?:the\\s+)?(?:[a-z]+\\s+)?([A-Z]\\w+)\\s+is\\s+returned", RegexOption.IGNORE_CASE)
+    private val REGEX_RETURNS_ON_SUCCESS =
+        Regex("returns?\\s+(?:an?\\s+)?([A-Z]\\w+)\\s+on\\s+success", RegexOption.IGNORE_CASE)
+    private val REGEX_AS_TYPE = Regex("as\\s+(?:an?\\s+)?([A-Z]\\w+)(?:\\s+object)?", RegexOption.IGNORE_CASE)
+    private val REGEX_RETURNS_OBJECT = Regex("returns?\\s+(?:an?\\s+)?([A-Z]\\w+)\\s+object", RegexOption.IGNORE_CASE)
+    private val REGEX_TYPE_OBJECT = Regex("([A-Z]\\w+)\\s+object", RegexOption.IGNORE_CASE)
+    private val REGEX_RETURNS_TYPE_OF = Regex("returns?\\s+(?:the\\s+)?([A-Z]\\w+)\\s+of", RegexOption.IGNORE_CASE)
+    private val REGEX_RETURNS_TYPE =
+        Regex("returns?\\s+(?:the\\s+)?(?:[a-z]+\\s+)?([A-Z]\\w+)(?:\\s|\\.|,|$)", RegexOption.IGNORE_CASE)
+    private val REGEX_ARRAY_OF_PATTERN = Regex(TYPE_ARRAY_OF, RegexOption.IGNORE_CASE)
+
     private data class ElementContent(
         val description: String,
         val table: Element?
@@ -135,9 +173,9 @@ object DocumentParser {
             emptyList()
         } else {
             val headerMap = parseTableHeaders(tableElement)
-            val fieldIndex = headerMap["field"] ?: headerMap["parameter"] ?: 0
-            val typeIndex = headerMap["type"] ?: 1
-            val descriptionIndex = headerMap["description"] ?: 2
+            val fieldIndex = headerMap[HEADER_FIELD] ?: headerMap[HEADER_PARAMETER] ?: 0
+            val typeIndex = headerMap[HEADER_TYPE] ?: 1
+            val descriptionIndex = headerMap[HEADER_DESCRIPTION] ?: 2
 
             tableElement.select("tbody tr").mapNotNull { row ->
                 val cols = row.select("td")
@@ -147,7 +185,7 @@ object DocumentParser {
                     Object.Field(
                         name = cols[fieldIndex].text().trim(),
                         type = Type.parse(typeString),
-                        required = !fieldDesc.startsWith("Optional", ignoreCase = true),
+                        required = !isOptionalField(fieldDesc),
                         description = fieldDesc
                     )
                 } else {
@@ -185,6 +223,16 @@ object DocumentParser {
         }
 
         return subtypes
+    }
+
+    /**
+     * Check if a field description indicates it's optional.
+     * Handles various formats like "Optional.", "*Optional*.", "Optional ", etc.
+     */
+    private fun isOptionalField(description: String): Boolean {
+        // Remove leading Markdown formatting (*, _, etc.) and whitespace
+        val cleaned = description.trimStart('*', '_', ' ', '\t')
+        return cleaned.startsWith("Optional", ignoreCase = true)
     }
 
     /**
@@ -243,10 +291,10 @@ object DocumentParser {
             emptyList()
         } else {
             val headerMap = parseTableHeaders(tableElement)
-            val parameterIndex = headerMap["parameter"] ?: headerMap["field"] ?: 0
-            val typeIndex = headerMap["type"] ?: 1
-            val requiredIndex = headerMap["required"] ?: 2
-            val descriptionIndex = headerMap["description"] ?: 3
+            val parameterIndex = headerMap[HEADER_PARAMETER] ?: headerMap[HEADER_FIELD] ?: 0
+            val typeIndex = headerMap[HEADER_TYPE] ?: 1
+            val requiredIndex = headerMap[HEADER_REQUIRED] ?: 2
+            val descriptionIndex = headerMap[HEADER_DESCRIPTION] ?: 3
 
             tableElement.select("tbody tr").mapNotNull { row ->
                 val cols = row.select("td")
@@ -284,11 +332,17 @@ object DocumentParser {
         )
     }
 
+    /**
+     * Check if a type string contains file-related types (InputFile or InputMedia).
+     */
+    internal fun hasFileType(typeString: String): Boolean {
+        return typeString.contains(TYPE_INPUT_FILE, ignoreCase = true) ||
+                typeString.contains(TYPE_INPUT_MEDIA, ignoreCase = true)
+    }
+
     private fun determineHttpMethod(methodName: String, parameters: List<Method.Parameter>): String {
         val hasFileParameter = parameters.any { param ->
-            val typeString = param.type.toString()
-            typeString.contains("InputFile", ignoreCase = true) ||
-                    typeString.contains("InputMedia", ignoreCase = true)
+            hasFileType(param.type.toString())
         }
         if (hasFileParameter) {
             return "POST"
@@ -298,56 +352,53 @@ object DocumentParser {
 
     private fun extractReturnType(description: String): String {
         // Check for Boolean type (True/False)
-        if (Regex("returns?\\s+True", RegexOption.IGNORE_CASE).containsMatchIn(description) ||
-            Regex("True\\s+(?:is|on)\\s+(?:returned|success)", RegexOption.IGNORE_CASE).containsMatchIn(description) ||
-            Regex("returns?\\s+False", RegexOption.IGNORE_CASE).containsMatchIn(description)
+        if (REGEX_RETURNS_TRUE.containsMatchIn(description) ||
+            REGEX_TRUE_IS_RETURNED.containsMatchIn(description) ||
+            REGEX_RETURNS_FALSE.containsMatchIn(description)
         ) {
             return "Boolean"
         }
 
         // Check for basic types (String, Integer)
-        if (Regex("returns?\\s+(?:a\\s+)?String", RegexOption.IGNORE_CASE).containsMatchIn(description) ||
-            Regex("String\\s+is\\s+returned", RegexOption.IGNORE_CASE).containsMatchIn(description) ||
-            Regex("as\\s+(?:a\\s+)?String", RegexOption.IGNORE_CASE).containsMatchIn(description)
+        if (REGEX_RETURNS_STRING.containsMatchIn(description) ||
+            REGEX_STRING_IS_RETURNED.containsMatchIn(description) ||
+            REGEX_AS_STRING.containsMatchIn(description)
         ) {
             return "String"
         }
 
-        if (Regex("returns?\\s+(?:an?\\s+)?Int(?:eger)?", RegexOption.IGNORE_CASE).containsMatchIn(description) ||
-            Regex("Integer\\s+is\\s+returned", RegexOption.IGNORE_CASE).containsMatchIn(description) ||
-            Regex("returns?\\s+(?:the\\s+)?number", RegexOption.IGNORE_CASE).containsMatchIn(description)
+        if (REGEX_RETURNS_INTEGER.containsMatchIn(description) ||
+            REGEX_INTEGER_IS_RETURNED.containsMatchIn(description) ||
+            REGEX_RETURNS_NUMBER.containsMatchIn(description)
         ) {
             return "Integer"
         }
 
         // Check for Array types (support nested arrays dynamically)
-        Regex("(?:returns?\\s+(?:an?\\s+)?)?((?:Array of )+)([A-Z]\\w+)", RegexOption.IGNORE_CASE).find(description)
-            ?.let {
-                val arrayPrefix = it.groupValues[1]
-                val elementType = it.groupValues[2]
+        REGEX_ARRAY_TYPE.find(description)?.let {
+            val arrayPrefix = it.groupValues[1]
+            val elementType = it.groupValues[2]
 
-                if (elementType[0].isUpperCase()) {
-                    val normalizedPrefix = arrayPrefix.replace(Regex("array of ", RegexOption.IGNORE_CASE), "Array of ")
-                    return "$normalizedPrefix$elementType"
-                }
+            if (elementType[0].isUpperCase()) {
+                val normalizedPrefix = arrayPrefix.replace(Regex("array of ", RegexOption.IGNORE_CASE), TYPE_ARRAY_OF)
+                return "$normalizedPrefix$elementType"
             }
+        }
 
         // Extract object type from various patterns (ordered by specificity)
 
         // "a X object is returned" or "the X object is returned"
-        Regex("(?:an?|the)\\s+([A-Z]\\w+)\\s+object\\s+is\\s+returned", RegexOption.IGNORE_CASE).find(description)
-            ?.let {
-                return it.groupValues[1]
-            }
+        REGEX_OBJECT_IS_RETURNED.find(description)?.let {
+            return it.groupValues[1]
+        }
 
         // "the X is returned" or "the sent/stopped/etc X is returned"
-        Regex("(?:the\\s+)?(?:[a-z]+\\s+)?([A-Z]\\w+)\\s+is\\s+returned", RegexOption.IGNORE_CASE).find(description)
-            ?.let {
-                return it.groupValues[1]
-            }
+        REGEX_TYPE_IS_RETURNED.find(description)?.let {
+            return it.groupValues[1]
+        }
 
         // "Returns X on success" or "Returns a X on success"
-        Regex("returns?\\s+(?:an?\\s+)?([A-Z]\\w+)\\s+on\\s+success", RegexOption.IGNORE_CASE).find(description)?.let {
+        REGEX_RETURNS_ON_SUCCESS.find(description)?.let {
             val typeName = it.groupValues[1]
             if (typeName.equals("True", ignoreCase = true) || typeName.equals("False", ignoreCase = true)) {
                 return "Boolean"
@@ -356,30 +407,28 @@ object DocumentParser {
         }
 
         // "as Type" or "as a Type object"
-        Regex("as\\s+(?:an?\\s+)?([A-Z]\\w+)(?:\\s+object)?", RegexOption.IGNORE_CASE).find(description)?.let {
+        REGEX_AS_TYPE.find(description)?.let {
             return it.groupValues[1]
         }
 
         // "returns a X object" or "returns X object"
-        Regex("returns?\\s+(?:an?\\s+)?([A-Z]\\w+)\\s+object", RegexOption.IGNORE_CASE).find(description)?.let {
+        REGEX_RETURNS_OBJECT.find(description)?.let {
             return it.groupValues[1]
         }
 
         // "X object" (without "returns")
-        Regex("([A-Z]\\w+)\\s+object", RegexOption.IGNORE_CASE).find(description)?.let {
+        REGEX_TYPE_OBJECT.find(description)?.let {
             return it.groupValues[1]
         }
 
         // "Returns the X of..." (e.g., "Returns the MessageId of the sent message")
-        Regex("returns?\\s+(?:the\\s+)?([A-Z]\\w+)\\s+of", RegexOption.IGNORE_CASE).find(description)?.let {
+        REGEX_RETURNS_TYPE_OF.find(description)?.let {
             return it.groupValues[1]
         }
 
         // "Returns the adjective TypeName" (e.g., "Returns the uploaded File")
         // This is the most general pattern and should be last
-        Regex("returns?\\s+(?:the\\s+)?(?:[a-z]+\\s+)?([A-Z]\\w+)(?:\\s|\\.|,|$)", RegexOption.IGNORE_CASE).find(
-            description
-        )?.let {
+        REGEX_RETURNS_TYPE.find(description)?.let {
             val typeName = it.groupValues[1]
             if (typeName[0].isUpperCase()) {
                 return typeName
@@ -407,12 +456,11 @@ object DocumentParser {
                 }
 
                 // Count how many "Array of" prefixes exist
-                val arrayOfPattern = Regex("Array of ", RegexOption.IGNORE_CASE)
-                val arrayCount = arrayOfPattern.findAll(normalizedType).count()
+                val arrayCount = REGEX_ARRAY_OF_PATTERN.findAll(normalizedType).count()
 
                 return if (arrayCount > 0) {
                     // Extract the element type (everything after the last "Array of")
-                    val elementType = normalizedType.substringAfterLast("Array of ", "").trim()
+                    val elementType = normalizedType.substringAfterLast(TYPE_ARRAY_OF, "").trim()
 
                     if (elementType.isEmpty() || !elementType[0].isUpperCase()) {
                         error("Invalid array element type: '$elementType' in type string: '$typeString'")
