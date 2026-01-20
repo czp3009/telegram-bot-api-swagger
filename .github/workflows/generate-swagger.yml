@@ -25,6 +25,15 @@ jobs:
       - name: Install jq
         uses: dcarbone/install-jq-action@v3.2.0
 
+      - name: Cache Gradle and Kotlin Native
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.konan
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
       - name: Generate Swagger file
         run: ./gradlew :generator:runReleaseExecutableLinuxX64
 
