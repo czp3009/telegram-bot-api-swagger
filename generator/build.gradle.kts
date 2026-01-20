@@ -21,9 +21,6 @@ kotlin {
 
     sourceSets {
         val nativeMain by getting
-        val mingwX64Main by getting {
-            dependsOn(nativeMain)
-        }
         val unixMain by creating {
             dependsOn(nativeMain)
         }
