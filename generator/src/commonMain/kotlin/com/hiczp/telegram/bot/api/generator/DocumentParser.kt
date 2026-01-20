@@ -142,7 +142,7 @@ object DocumentParser {
             tableElement.select("tbody tr").mapNotNull { row ->
                 val cols = row.select("td")
                 if (cols.size > maxOf(fieldIndex, typeIndex, descriptionIndex)) {
-                    val fieldDesc = cols[descriptionIndex].text().trim()
+                    val fieldDesc = htmlToMarkdown(cols[descriptionIndex])
                     val typeString = cols[typeIndex].text().trim()
                     Object.Field(
                         name = cols[fieldIndex].text().trim(),
@@ -187,6 +187,52 @@ object DocumentParser {
         return subtypes
     }
 
+    /**
+     * Convert HTML element to Markdown-formatted text, preserving links.
+     * Converts <a href="url">text</a> to [text](url)
+     */
+    private fun htmlToMarkdown(element: Element): String {
+        val html = element.html()
+        val baseUrl = "https://core.telegram.org/bots/api"
+
+        // Convert <a> tags to Markdown links
+        var markdown =
+            html.replace(Regex("<a\\s+href=\"([^\"]+)\"[^>]*>([^<]+)</a>", RegexOption.IGNORE_CASE)) { matchResult ->
+                var url = matchResult.groupValues[1]
+                val text = matchResult.groupValues[2]
+
+                // Convert relative URLs to absolute URLs
+                if (url.startsWith("#")) {
+                    url = "$baseUrl$url"
+                } else if (url.startsWith("/")) {
+                    url = "https://core.telegram.org$url"
+                }
+
+                "[$text]($url)"
+            }
+
+        // Convert <em> and <i> tags to Markdown italic
+        markdown = markdown.replace(Regex("<(?:em|i)>([^<]+)</(?:em|i)>", RegexOption.IGNORE_CASE), "*$1*")
+
+        // Convert <strong> and <b> tags to Markdown bold
+        markdown = markdown.replace(Regex("<(?:strong|b)>([^<]+)</(?:strong|b)>", RegexOption.IGNORE_CASE), "**$1**")
+
+        // Convert <code> tags to Markdown code
+        markdown = markdown.replace(Regex("<code>([^<]+)</code>", RegexOption.IGNORE_CASE), "`$1`")
+
+        // Remove remaining HTML tags
+        markdown = markdown.replace(Regex("<[^>]+>"), "")
+
+        // Decode HTML entities
+        markdown = markdown
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&")
+
+        return markdown.trim()
+    }
+
     private fun parseMethod(
         name: String,
         description: String,
@@ -210,7 +256,7 @@ object DocumentParser {
                         name = cols[parameterIndex].text().trim(),
                         type = Type.parse(typeString),
                         required = cols[requiredIndex].text().trim().equals("Yes", ignoreCase = true),
-                        description = cols[descriptionIndex].text().trim()
+                        description = htmlToMarkdown(cols[descriptionIndex])
                     )
                 } else {
                     logger.warn {

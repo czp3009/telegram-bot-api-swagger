@@ -1,13 +1,20 @@
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    kotlin("plugin.serialization") version "2.3.0"
+}
+
+// Task to generate Version.kt with the project version using KotlinPoet
+val generateVersionFile by tasks.registering(GenerateVersionTask::class) {
+    projectVersion.set(project.version.toString())
+    packageName.set("com.hiczp.telegram.bot.api.generator")
+    outputDirectory.set(layout.buildDirectory.dir("generated/kotlin"))
 }
 
 kotlin {
     applyDefaultHierarchyTemplate()
-    
+
     mingwX64()
     linuxX64()
     macosX64()
@@ -20,6 +27,17 @@ kotlin {
     }
 
     sourceSets {
+        val commonMain by getting {
+            kotlin.srcDir(layout.buildDirectory.dir("generated/kotlin"))
+            dependencies {
+                implementation(libs.kotlinx.coroutines.core)
+                implementation(libs.ktor.client.core)
+                implementation(libs.ktor.client.curl)
+                implementation(libs.ksoup)
+                implementation(libs.openapi.bindings)
+                implementation(libs.kotlinLogging)
+            }
+        }
         val nativeMain by getting
         val unixMain by creating {
             dependsOn(nativeMain)
@@ -34,15 +52,9 @@ kotlin {
             dependsOn(unixMain)
         }
     }
+}
 
-    @Suppress("OPT_IN_USAGE")
-    dependencies {
-        implementation(libs.kotlinx.coroutines.core)
-        implementation(libs.kotlinx.serialization.json)
-        implementation(libs.ktor.client.core)
-        implementation(libs.ktor.client.curl)
-        implementation(libs.ksoup)
-        implementation(libs.openapi.bindings)
-        implementation(libs.kotlinLogging)
-    }
+// Make sure the version file is generated before Kotlin compilation
+tasks.withType<KotlinCompilationTask<*>>().configureEach {
+    dependsOn(generateVersionFile)
 }

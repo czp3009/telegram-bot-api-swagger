@@ -12,7 +12,7 @@ fun main() {
         logger.info { "Fetched document" }
         val (methods, objects) = DocumentParser.parse(html)
         logger.info { "Parsed document" }
-        val swaggerJson = SwaggerGenerator.generate(methods, objects)
+        val swaggerJson = SwaggerGenerator.generate(methods, objects, Version.PROJECT_VERSION)
         logger.info { "Generated swagger" }
 
         // Write to the swagger folder

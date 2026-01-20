@@ -12,7 +12,7 @@ object SwaggerGenerator {
     // Store union type information for reference during schema conversion
     private val unionTypes = mutableMapOf<String, List<String>>()
 
-    fun generate(methods: List<Method>, objects: List<Object>): String {
+    fun generate(methods: List<Method>, objects: List<Object>, apiVersion: String = "1.0.0"): String {
         logger.info { "Generating OpenAPI specification for ${methods.size} methods and ${objects.size} objects" }
 
         // Build union type map
@@ -22,11 +22,11 @@ object SwaggerGenerator {
         }
 
         val openApi = OpenAPIV3Model(
-            openapi = "3.0.3",
+            openapi = "3.0.0",
             info = InfoObject(
                 title = "Telegram Bot API",
                 description = "Auto-generated OpenAPI specification for Telegram Bot API",
-                version = "7.0"
+                version = apiVersion
             ),
             servers = listOf(
                 Server(
@@ -99,7 +99,7 @@ object SwaggerGenerator {
         hasFileParameter: Boolean
     ): OpenAPIV3RequestBody {
         val properties = parameters.associate { param ->
-            param.name to convertTypeToSchema(param.type)
+            param.name to convertParameterToSchema(param)
         }
 
         val requiredFields = parameters.filter { it.required }.map { it.name }
@@ -160,12 +160,67 @@ object SwaggerGenerator {
                     type = OpenAPIV3Type.OBJECT,
                     description = obj.description.ifEmpty { null },
                     properties = obj.fields.associate { field ->
-                        field.name to convertTypeToSchema(field.type)
+                        field.name to convertFieldToSchema(field)
                     }.ifEmpty { null },
                     required = obj.fields.filter { it.required }.map { it.name }.ifEmpty { null }
                 )
             }
             obj.name to schema
+        }
+    }
+
+    private fun convertParameterToSchema(param: Method.Parameter): OpenAPIV3SchemaOrReference {
+        val baseSchema = convertTypeToSchema(param.type)
+
+        return when (baseSchema) {
+            is OpenAPIV3Schema -> {
+                if (param.description.isNotEmpty()) {
+                    baseSchema.copy(description = param.description)
+                } else {
+                    baseSchema
+                }
+            }
+
+            is OpenAPIV3Reference -> {
+                if (param.description.isNotEmpty()) {
+                    OpenAPIV3Schema(
+                        allOf = listOf(baseSchema),
+                        description = param.description
+                    )
+                } else {
+                    baseSchema
+                }
+            }
+        }
+    }
+
+    private fun convertFieldToSchema(field: Object.Field): OpenAPIV3SchemaOrReference {
+        val baseSchema = convertTypeToSchema(field.type)
+
+        // If the base schema is a reference, we need to wrap it with description
+        // If it's a schema, we can add description directly
+        return when (baseSchema) {
+            is OpenAPIV3Schema -> {
+                // For inline schemas (primitives, arrays), add description
+                if (field.description.isNotEmpty()) {
+                    baseSchema.copy(description = field.description)
+                } else {
+                    baseSchema
+                }
+            }
+
+            is OpenAPIV3Reference -> {
+                // For references to other schemas, we need to create a wrapper schema with allOf
+                // to add the description without modifying the referenced schema
+                if (field.description.isNotEmpty()) {
+                    OpenAPIV3Schema(
+                        allOf = listOf(baseSchema),
+                        description = field.description
+                    )
+                } else {
+                    baseSchema
+                }
+            }
         }
     }
 
