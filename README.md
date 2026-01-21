@@ -1,7 +1,7 @@
 # Telegram Bot API Swagger
 
-A Kotlin Multiplatform tool that automatically generates OpenAPI/Swagger specification from the official Telegram Bot
-API documentation.
+A Kotlin Multiplatform tool that automatically generates OpenAPI/Swagger specification from
+the [official Telegram Bot API documentation](https://core.telegram.org/bots/api).
 
 ## Features
 
@@ -49,4 +49,4 @@ tools like Swagger UI, Postman, or for generating client libraries.
 
 ## License
 
-MIT License
+[MIT License](https://opensource.org/license/mit)
