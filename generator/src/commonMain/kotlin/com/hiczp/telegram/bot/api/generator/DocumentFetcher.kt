@@ -19,8 +19,8 @@ object DocumentFetcher {
                 if (proxyUrl != null) {
                     logger.info { "Using proxy $proxyUrl" }
                     proxy = ProxyBuilder.http(Url(proxyUrl))
-                    sslVerify = false
                 }
+                sslVerify = false
             }
         }
     }
