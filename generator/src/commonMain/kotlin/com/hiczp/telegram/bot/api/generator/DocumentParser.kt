@@ -194,7 +194,20 @@ object DocumentParser {
         tableElement: Element?
     ): Object {
         // Check if this is a union type definition
-        val isUnionType = description.contains("can be one of", ignoreCase = true)
+        // Patterns: 
+        // 1. "can be one of"
+        // 2. "should be one of"
+        // 3. "It can be one of"
+        // 4. "the following X scopes are supported"
+        // 5. "the following X types"
+        // 6. "currently support results of the following X types"
+        val isUnionType = description.contains("can be one of", ignoreCase = true) ||
+                description.contains("should be one of", ignoreCase = true) ||
+                description.contains("It can be one of", ignoreCase = true) ||
+                description.contains(Regex("the following \\d+ \\w+ are supported", RegexOption.IGNORE_CASE)) ||
+                description.contains(Regex("the following \\d+ types", RegexOption.IGNORE_CASE)) ||
+                description.contains(Regex("support.*the following \\d+ types", RegexOption.IGNORE_CASE))
+        
         val unionSubtypes = if (isUnionType) {
             extractUnionSubtypes(description)
         } else {
@@ -242,18 +255,65 @@ object DocumentParser {
     }
 
     private fun extractUnionSubtypes(description: String): List<String> {
-        // Extract subtypes from description like "can be one of: Type1, Type2, Type3"
+        // Extract subtypes from description patterns:
+        // 1. "can be one of: Type1, Type2, Type3"
+        // 2. "should be one of: Type1, Type2, Type3"
+        // 3. "It can be one of: Type1, Type2, Type3"
+        // 4. "the following X scopes are supported: Type1, Type2, Type3"
+        // 5. "the following X types: Type1, Type2, Type3"
+        // 6. "currently support results of the following X types: Type1, Type2, Type3"
+        
         val subtypes = mutableListOf<String>()
 
-        // Match pattern like "can be one of" followed by a list
-        val pattern = Regex("can be one of[:\\s]*", RegexOption.IGNORE_CASE)
-        val afterPattern = description.substringAfter(pattern.find(description)?.value ?: "", "")
+        // Try different patterns
+        val patterns = listOf(
+            Regex("(?:can|should) be one of[:\\s]*", RegexOption.IGNORE_CASE),
+            Regex("It can be one of[:\\s]*", RegexOption.IGNORE_CASE),
+            Regex("the following \\d+ \\w+ are supported[:\\s]*", RegexOption.IGNORE_CASE),
+            Regex("the following \\d+ types[:\\s]*", RegexOption.IGNORE_CASE),
+            Regex("support.*the following \\d+ types[:\\s]*", RegexOption.IGNORE_CASE)
+        )
+
+        var afterPattern = ""
+        for (pattern in patterns) {
+            val match = pattern.find(description)
+            if (match != null) {
+                afterPattern = description.substring(match.range.last + 1)
+                break
+            }
+        }
 
         if (afterPattern.isNotEmpty()) {
-            // Extract type names (capitalized words)
+            // Extract type names from the list
+            // Look for capitalized words that appear in links or as standalone items
+            // Don't stop at newline - the type list might continue on the next line
+            val listPart = afterPattern.split(Regex("[.]"))[0]
+
+            // Extract type names (capitalized words that look like type names)
+            // Exclude common English words like "This", "Currently", "The", etc.
+            val excludedWords = setOf(
+                "This",
+                "Currently",
+                "The",
+                "A",
+                "An",
+                "If",
+                "For",
+                "By",
+                "In",
+                "On",
+                "At",
+                "To",
+                "From",
+                "Note",
+                "All"
+            )
             val typePattern = Regex("\\b([A-Z][a-zA-Z0-9]+)\\b")
-            typePattern.findAll(afterPattern).forEach { match ->
-                subtypes.add(match.groupValues[1])
+            typePattern.findAll(listPart).forEach { match ->
+                val typeName = match.groupValues[1]
+                if (typeName !in excludedWords) {
+                    subtypes.add(typeName)
+                }
             }
         }
 

@@ -12,6 +12,9 @@ object SwaggerGenerator {
     // Store union type information for reference during schema conversion
     private val unionTypes = mutableMapOf<String, List<String>>()
 
+    // Store discriminator information: typeName -> (fieldName, mapping of subtype -> value)
+    private val discriminatorInfo = mutableMapOf<String, Pair<String, Map<String, String>>>()
+
     fun generate(methods: List<Method>, objects: List<Object>, apiVersion: String = "1.0.0"): String {
         logger.info { "Generating OpenAPI specification for ${methods.size} methods and ${objects.size} objects" }
 
@@ -20,6 +23,10 @@ object SwaggerGenerator {
         objects.filter { it.isUnionType }.forEach { obj ->
             unionTypes[obj.name] = obj.unionSubtypes
         }
+
+        // Build discriminator info map by examining union subtypes
+        discriminatorInfo.clear()
+        buildDiscriminatorInfo(objects)
 
         val openApi = OpenAPIV3Model(
             openapi = "3.0.0",
@@ -51,6 +58,76 @@ object SwaggerGenerator {
         )
 
         return OpenAPIV3.encodeToString(openApi)
+    }
+
+    /**
+     * Build discriminator information by examining union subtypes.
+     * For each union type, check if all subtypes have a common field with constant values.
+     * 
+     * Only processes union types - non-union types are skipped as they don't need discriminators.
+     */
+    private fun buildDiscriminatorInfo(objects: List<Object>) {
+        // Pattern to identify discriminator fields by their description:
+        // Common patterns:
+        // 1. "Type of the [X], always \"value\"" or "Type of the [X], must be *value*"
+        // 2. "Source of the [X], always \"value\""
+        // 3. "Scope type, must be *value*"
+        // 4. "Error source, must be *value*"
+        // 5. "Type of the result, must be *value*"
+        // 6. "The member's status in the chat, always \"value\""
+        // 
+        // Strategy: Look for descriptions that:
+        // - Start with common discriminator field prefixes: "Type of the", "Source of the", etc.
+        // - Contain keywords indicating constant values: "always", "must be", "must"
+        // - End with a quoted or emphasized value
+        val discriminatorPattern = Regex(
+            """^(?:Type of the .+?|Source of the .+?|Scope type|Error source|Type of the result|The .+?),\s+(always\s+["\u201C\u201D']([^"\u201C\u201D']+)["\u201C\u201D']|must\s+be\s+\*([^*]+)\*|must\s+["\u201C\u201D']([^"\u201C\u201D']+)["\u201C\u201D'])""",
+            RegexOption.IGNORE_CASE
+        )
+        
+        // Create a map of object name to object for quick lookup
+        val objectMap = objects.associateBy { it.name }
+
+        // For each union type, examine its subtypes
+        // IMPORTANT: Only process union types - skip non-union types
+        unionTypes.forEach { (unionTypeName, subtypes) ->
+            logger.debug { "Examining union type $unionTypeName with subtypes: $subtypes" }
+
+            // Collect discriminator candidates from all subtypes
+            val discriminatorCandidates =
+                mutableMapOf<String, MutableMap<String, String>>() // fieldName -> (subtype -> value)
+
+            subtypes.forEach { subtypeName ->
+                val subtype = objectMap[subtypeName] ?: return@forEach
+
+                // Check each field in the subtype for discriminator pattern
+                subtype.fields.forEach { field ->
+                    val match = discriminatorPattern.find(field.description) ?: return@forEach
+
+                    // Extract the value from either group 2 (always pattern), group 3 (must be pattern), or group 4 (must pattern)
+                    val value = match.groupValues[2].ifEmpty {
+                        match.groupValues[3].ifEmpty {
+                            match.groupValues[4]
+                        }
+                    }
+
+                    if (value.isNotEmpty()) {
+                        discriminatorCandidates
+                            .getOrPut(field.name) { mutableMapOf() }[subtypeName] = value
+                        logger.debug { "Found discriminator candidate in $subtypeName.${field.name}: $value" }
+                    }
+                }
+            }
+
+            // Find a field that has values for all subtypes
+            discriminatorCandidates.forEach { (fieldName, mapping) ->
+                if (mapping.size == subtypes.size) {
+                    // All subtypes have this field with constant values
+                    discriminatorInfo[unionTypeName] = fieldName to mapping
+                    logger.info { "Added discriminator for $unionTypeName: field=$fieldName, mapping=$mapping" }
+                }
+            }
+        }
     }
 
     private fun generatePaths(methods: List<Method>): Map<Path, OpenAPIV3PathItem> {
@@ -146,11 +223,28 @@ object SwaggerGenerator {
         val schemas = objects.associate { obj ->
             val schema = if (obj.isUnionType) {
                 // For union types, create a schema with oneOf pointing to subtypes
+                val discriminator = discriminatorInfo[obj.name]?.let { (fieldName, mapping) ->
+                    // OpenAPI discriminator mapping: discriminatorValue -> schemaRef
+                    // mapping is currently: subtype -> discriminatorValue
+                    // We need to reverse it to: discriminatorValue -> "#/components/schemas/subtype"
+                    val reversedMapping = mapping.map { (subtype, value) ->
+                        value to "#/components/schemas/$subtype"
+                    }.toMap()
+
+                    OpenAPIV3Discriminator(
+                        propertyName = fieldName,
+                        mapping = reversedMapping
+                    )
+                }
+
+                val oneOfList = obj.unionSubtypes.map { subtype ->
+                    OpenAPIV3Reference(ref = Ref("#/components/schemas/$subtype"))
+                }
+                
                 OpenAPIV3Schema(
                     description = obj.description.ifEmpty { null },
-                    oneOf = obj.unionSubtypes.map { subtype ->
-                        OpenAPIV3Reference(ref = Ref("#/components/schemas/$subtype"))
-                    }.ifEmpty { null }
+                    oneOf = oneOfList.ifEmpty { null },
+                    discriminator = discriminator
                 )
             } else {
                 // For regular types, create a normal object schema
