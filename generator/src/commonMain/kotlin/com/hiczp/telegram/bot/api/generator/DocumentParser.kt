@@ -2,6 +2,7 @@ package com.hiczp.telegram.bot.api.generator
 
 import com.fleeksoft.ksoup.Ksoup
 import com.fleeksoft.ksoup.nodes.Element
+import com.fleeksoft.ksoup.nodes.TextNode
 import io.github.oshai.kotlinlogging.KotlinLogging
 
 private val logger = KotlinLogging.logger {}
@@ -56,7 +57,8 @@ object DocumentParser {
 
     private data class ElementContent(
         val description: String,
-        val table: Element?
+        val table: Element?,
+        val elements: List<Element>
     )
 
     /**
@@ -120,11 +122,11 @@ object DocumentParser {
 
                 when {
                     firstChar.isUpperCase() -> {
-                        objects.add(parseObject(name, content.description, content.table))
+                        objects.add(parseObject(name, content))
                     }
 
                     firstChar.isLowerCase() -> {
-                        methods.add(parseMethod(name, content.description, content.table))
+                        methods.add(parseMethod(name, content))
                     }
 
                     else -> logger.info { "h4 tag is neither object nor method: $name" }
@@ -149,9 +151,11 @@ object DocumentParser {
     private fun extractContent(startElement: Element): ElementContent {
         val descriptionBuilder = StringBuilder()
         var tableElement: Element? = null
+        val elements = mutableListOf<Element>()
 
         var next = startElement.nextElementSibling()
         while (next != null && next.tagName() !in listOf(TAG_H3, TAG_H4)) {
+            elements.add(next)
             when {
                 next.tagName() == TAG_TABLE -> tableElement = next
                 else -> descriptionBuilder.append(next.text()).append("\n")
@@ -161,7 +165,8 @@ object DocumentParser {
 
         return ElementContent(
             description = descriptionBuilder.toString().trim(),
-            table = tableElement
+            table = tableElement,
+            elements = elements
         )
     }
 
@@ -190,8 +195,7 @@ object DocumentParser {
 
     private fun parseObject(
         name: String,
-        description: String,
-        tableElement: Element?
+        content: ElementContent
     ): Object {
         // Check if this is a union type definition
         // Patterns: 
@@ -201,31 +205,31 @@ object DocumentParser {
         // 4. "the following X scopes are supported"
         // 5. "the following X types"
         // 6. "currently support results of the following X types"
-        val isUnionType = description.contains("can be one of", ignoreCase = true) ||
-                description.contains("should be one of", ignoreCase = true) ||
-                description.contains("It can be one of", ignoreCase = true) ||
-                description.contains(Regex("the following \\d+ \\w+ are supported", RegexOption.IGNORE_CASE)) ||
-                description.contains(Regex("the following \\d+ types", RegexOption.IGNORE_CASE)) ||
-                description.contains(Regex("support.*the following \\d+ types", RegexOption.IGNORE_CASE))
+        val isUnionType = content.description.contains("can be one of", ignoreCase = true) ||
+                content.description.contains("should be one of", ignoreCase = true) ||
+                content.description.contains("It can be one of", ignoreCase = true) ||
+                content.description.contains(Regex("the following \\d+ \\w+ are supported", RegexOption.IGNORE_CASE)) ||
+                content.description.contains(Regex("the following \\d+ types", RegexOption.IGNORE_CASE)) ||
+                content.description.contains(Regex("support.*the following \\d+ types", RegexOption.IGNORE_CASE))
         
         val unionSubtypes = if (isUnionType) {
-            extractUnionSubtypes(description)
+            extractUnionSubtypes(content.elements)
         } else {
             emptyList()
         }
 
-        val fields = if (tableElement == null) {
+        val fields = if (content.table == null) {
             if (!isUnionType) {
                 logger.warn { "Object $name has no table element, fields will be empty" }
             }
             emptyList()
         } else {
-            val headerMap = parseTableHeaders(tableElement)
+            val headerMap = parseTableHeaders(content.table)
             val fieldIndex = headerMap[HEADER_FIELD] ?: headerMap[HEADER_PARAMETER] ?: 0
             val typeIndex = headerMap[HEADER_TYPE] ?: 1
             val descriptionIndex = headerMap[HEADER_DESCRIPTION] ?: 2
 
-            tableElement.select("tbody tr").mapNotNull { row ->
+            content.table.select("tbody tr").mapNotNull { row ->
                 val cols = row.select("td")
                 if (cols.size > maxOf(fieldIndex, typeIndex, descriptionIndex)) {
                     val fieldDesc = htmlToMarkdown(cols[descriptionIndex])
@@ -251,68 +255,41 @@ object DocumentParser {
             }
         }
 
-        return Object(name, description, fields, isUnionType, unionSubtypes)
+        return Object(name, content.description, fields, isUnionType, unionSubtypes)
     }
 
-    private fun extractUnionSubtypes(description: String): List<String> {
-        // Extract subtypes from description patterns:
-        // 1. "can be one of: Type1, Type2, Type3"
-        // 2. "should be one of: Type1, Type2, Type3"
-        // 3. "It can be one of: Type1, Type2, Type3"
-        // 4. "the following X scopes are supported: Type1, Type2, Type3"
-        // 5. "the following X types: Type1, Type2, Type3"
-        // 6. "currently support results of the following X types: Type1, Type2, Type3"
+    private fun extractUnionSubtypes(elements: List<Element>): List<String> {
+        // Extract subtypes from <ul><li> list elements
+        // Look for the first <ul> element that contains <li> items with type names
         
         val subtypes = mutableListOf<String>()
 
-        // Try different patterns
-        val patterns = listOf(
-            Regex("(?:can|should) be one of[:\\s]*", RegexOption.IGNORE_CASE),
-            Regex("It can be one of[:\\s]*", RegexOption.IGNORE_CASE),
-            Regex("the following \\d+ \\w+ are supported[:\\s]*", RegexOption.IGNORE_CASE),
-            Regex("the following \\d+ types[:\\s]*", RegexOption.IGNORE_CASE),
-            Regex("support.*the following \\d+ types[:\\s]*", RegexOption.IGNORE_CASE)
-        )
+        for (element in elements) {
+            if (element.tagName() == "ul") {
+                // Extract type names from <li> elements
+                val listItems = element.select("li")
+                for (item in listItems) {
+                    // Extract the type name from the link text or plain text
+                    // Pattern: <li><a href="...">TypeName</a></li>
+                    val links = item.select("a")
+                    if (links.isNotEmpty()) {
+                        // Get text from the first link
+                        val typeName = links.first()?.text()?.trim()
+                        if (!typeName.isNullOrEmpty() && typeName[0].isUpperCase()) {
+                            subtypes.add(typeName)
+                        }
+                    } else {
+                        // No link, try to extract from plain text
+                        val text = item.text().trim()
+                        if (text.isNotEmpty() && text[0].isUpperCase()) {
+                            subtypes.add(text)
+                        }
+                    }
+                }
 
-        var afterPattern = ""
-        for (pattern in patterns) {
-            val match = pattern.find(description)
-            if (match != null) {
-                afterPattern = description.substring(match.range.last + 1)
-                break
-            }
-        }
-
-        if (afterPattern.isNotEmpty()) {
-            // Extract type names from the list
-            // Look for capitalized words that appear in links or as standalone items
-            // Don't stop at newline - the type list might continue on the next line
-            val listPart = afterPattern.split(Regex("[.]"))[0]
-
-            // Extract type names (capitalized words that look like type names)
-            // Exclude common English words like "This", "Currently", "The", etc.
-            val excludedWords = setOf(
-                "This",
-                "Currently",
-                "The",
-                "A",
-                "An",
-                "If",
-                "For",
-                "By",
-                "In",
-                "On",
-                "At",
-                "To",
-                "From",
-                "Note",
-                "All"
-            )
-            val typePattern = Regex("\\b([A-Z][a-zA-Z0-9]+)\\b")
-            typePattern.findAll(listPart).forEach { match ->
-                val typeName = match.groupValues[1]
-                if (typeName !in excludedWords) {
-                    subtypes.add(typeName)
+                // If we found subtypes in this <ul>, we're done
+                if (subtypes.isNotEmpty()) {
+                    break
                 }
             }
         }
@@ -332,66 +309,78 @@ object DocumentParser {
 
     /**
      * Convert HTML element to Markdown-formatted text, preserving links.
-     * Converts <a href="url">text</a> to [text](url)
+     * Uses DOM traversal instead of regex for more reliable conversion.
      */
     private fun htmlToMarkdown(element: Element): String {
-        val html = element.html()
         val baseUrl = "https://core.telegram.org/bots/api"
 
-        // Convert <a> tags to Markdown links
-        var markdown =
-            html.replace(Regex("<a\\s+href=\"([^\"]+)\"[^>]*>([^<]+)</a>", RegexOption.IGNORE_CASE)) { matchResult ->
-                var url = matchResult.groupValues[1]
-                val text = matchResult.groupValues[2]
+        fun convertNode(node: Element): String {
+            val result = StringBuilder()
 
-                // Convert relative URLs to absolute URLs
-                if (url.startsWith("#")) {
-                    url = "$baseUrl$url"
-                } else if (url.startsWith("/")) {
-                    url = "https://core.telegram.org$url"
+            for (child in node.childNodes()) {
+                when (child) {
+                    is TextNode -> {
+                        result.append(child.text())
+                    }
+
+                    is Element -> {
+                        when (child.tagName().lowercase()) {
+                            "a" -> {
+                                var url = child.attr("href")
+                                val text = child.text()
+
+                                // Convert relative URLs to absolute URLs
+                                url = when {
+                                    url.startsWith("#") -> "$baseUrl$url"
+                                    url.startsWith("/") -> "https://core.telegram.org$url"
+                                    else -> url
+                                }
+
+                                result.append("[$text]($url)")
+                            }
+
+                            "em", "i" -> {
+                                result.append("*${child.text()}*")
+                            }
+
+                            "strong", "b" -> {
+                                result.append("**${child.text()}**")
+                            }
+
+                            "code" -> {
+                                result.append("`${child.text()}`")
+                            }
+
+                            else -> {
+                                // For other tags, recursively process children
+                                result.append(convertNode(child))
+                            }
+                        }
+                    }
                 }
-
-                "[$text]($url)"
             }
 
-        // Convert <em> and <i> tags to Markdown italic
-        markdown = markdown.replace(Regex("<(?:em|i)>([^<]+)</(?:em|i)>", RegexOption.IGNORE_CASE), "*$1*")
+            return result.toString()
+        }
 
-        // Convert <strong> and <b> tags to Markdown bold
-        markdown = markdown.replace(Regex("<(?:strong|b)>([^<]+)</(?:strong|b)>", RegexOption.IGNORE_CASE), "**$1**")
-
-        // Convert <code> tags to Markdown code
-        markdown = markdown.replace(Regex("<code>([^<]+)</code>", RegexOption.IGNORE_CASE), "`$1`")
-
-        // Remove remaining HTML tags
-        markdown = markdown.replace(Regex("<[^>]+>"), "")
-
-        // Decode HTML entities
-        markdown = markdown
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&amp;", "&")
-
-        return markdown.trim()
+        return convertNode(element).trim()
     }
 
     private fun parseMethod(
         name: String,
-        description: String,
-        tableElement: Element?
+        content: ElementContent
     ): Method {
-        val parameters = if (tableElement == null) {
+        val parameters = if (content.table == null) {
             logger.warn { "Method $name has no table element, parameters will be empty" }
             emptyList()
         } else {
-            val headerMap = parseTableHeaders(tableElement)
+            val headerMap = parseTableHeaders(content.table)
             val parameterIndex = headerMap[HEADER_PARAMETER] ?: headerMap[HEADER_FIELD] ?: 0
             val typeIndex = headerMap[HEADER_TYPE] ?: 1
             val requiredIndex = headerMap[HEADER_REQUIRED] ?: 2
             val descriptionIndex = headerMap[HEADER_DESCRIPTION] ?: 3
 
-            tableElement.select("tbody tr").mapNotNull { row ->
+            content.table.select("tbody tr").mapNotNull { row ->
                 val cols = row.select("td")
                 if (cols.size > maxOf(parameterIndex, typeIndex, requiredIndex, descriptionIndex)) {
                     val typeString = cols[typeIndex].text().trim()
@@ -417,10 +406,10 @@ object DocumentParser {
             }
         }
 
-        val returnTypeString = extractReturnType(description)
+        val returnTypeString = extractReturnType(content.description)
         return Method(
             name,
-            description,
+            content.description,
             parameters,
             Type.parse(returnTypeString),
             determineHttpMethod(name, parameters)
