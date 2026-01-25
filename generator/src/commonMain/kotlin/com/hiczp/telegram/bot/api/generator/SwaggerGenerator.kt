@@ -204,7 +204,7 @@ object SwaggerGenerator {
 
     /**
      * Convert a type to schema and optionally add the description if the schema is inline.
-     * For references, the description should be in the referenced schema definition.
+     * For references with descriptions, wrap them in an allOf to preserve the description.
      */
     private fun convertToSchemaWithDescription(
         type: DocumentParser.Type,
@@ -220,9 +220,15 @@ object SwaggerGenerator {
             }
 
             is OpenAPIV3Reference -> {
-                // For references, just return the reference directly
-                // Description should be in the referenced schema definition
-                baseSchema
+                // For references with descriptions, wrap in allOf to preserve the description
+                if (description.isNotEmpty()) {
+                    OpenAPIV3Schema(
+                        allOf = listOf(baseSchema),
+                        description = description
+                    )
+                } else {
+                    baseSchema
+                }
             }
         }
     }
