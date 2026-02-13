@@ -103,8 +103,9 @@ object DocumentParser {
         check(startIndex != -1) { "Not found h3 tag $SECTION_TITLE" }
 
         val objects = mutableListOf<Object>()
-        val methods = mutableListOf<Method>()
+        val methodsWithoutHttpMethod = mutableListOf<Pair<String, ElementContent>>()
 
+        // First pass: parse all objects and collect method data
         elements.drop(startIndex + 1).forEach { element ->
             if (element.tagName() == TAG_H4) {
                 val name = element.text().trim()
@@ -126,13 +127,19 @@ object DocumentParser {
                     }
 
                     firstChar.isLowerCase() -> {
-                        methods.add(parseMethod(name, content))
+                        methodsWithoutHttpMethod.add(name to content)
                     }
 
                     else -> logger.info { "h4 tag is neither object nor method: $name" }
                 }
             }
         }
+
+        // Second pass: parse methods with access to all objects
+        val methods = methodsWithoutHttpMethod.map { (name, content) ->
+            parseMethod(name, content, objects)
+        }
+
         logger.info { "Parsed ${objects.size} objects and ${methods.size} methods" }
         return methods to objects
     }
@@ -368,7 +375,8 @@ object DocumentParser {
 
     private fun parseMethod(
         name: String,
-        content: ElementContent
+        content: ElementContent,
+        objects: List<Object>
     ): Method {
         val parameters = if (content.table == null) {
             logger.warn { "Method $name has no table element, parameters will be empty" }
@@ -412,7 +420,7 @@ object DocumentParser {
             content.description,
             parameters,
             Type.parse(returnTypeString),
-            determineHttpMethod(name, parameters)
+            determineHttpMethod(name, parameters, objects)
         )
     }
 
@@ -424,11 +432,143 @@ object DocumentParser {
                 typeString.contains(TYPE_INPUT_MEDIA, ignoreCase = true)
     }
 
-    private fun determineHttpMethod(methodName: String, parameters: List<Method.Parameter>): String {
+    /**
+     * Check if a type string is directly InputFile (not InputMedia).
+     * This is used to distinguish direct file uploads from indirect file references.
+     */
+    internal fun isDirectInputFile(typeString: String): Boolean {
+        return typeString.contains(TYPE_INPUT_FILE, ignoreCase = true)
+    }
+
+    /**
+     * Check if a field description indicates it's a file type that supports attach://.
+     * This is identified by the phrase "More information on Sending Files" in the description.
+     */
+    private fun isFileFieldByDescription(description: String): Boolean {
+        return description.contains("More information on Sending Files", ignoreCase = true) ||
+                description.contains("attach://", ignoreCase = false)
+    }
+
+    /**
+     * Check if a type has any file-related fields by examining all of its subtypes recursively.
+     * This is used to detect union types whose subtypes contain file fields.
+     */
+    internal fun hasNestedFileType(typeName: String, objects: List<Object>): Boolean {
+        val objectMap = objects.associateBy { it.name }
+
+        fun checkTypeRecursively(name: String, visited: MutableSet<String> = mutableSetOf()): Boolean {
+            // Avoid infinite recursion
+            if (name in visited) return false
+            visited.add(name)
+
+            // Check if the type name itself is a file type
+            if (hasFileType(name)) {
+                logger.debug { "Type $name is a file type (matches InputFile or InputMedia)" }
+                return true
+            }
+
+            // Find the object definition
+            val obj = objectMap[name] ?: return false
+
+            // If it's a union type, check all subtypes
+            if (obj.isUnionType) {
+                val hasFile = obj.unionSubtypes.any { subtype ->
+                    checkTypeRecursively(subtype, visited)
+                }
+                if (hasFile) {
+                    logger.debug { "Union type $name contains file fields in subtypes: ${obj.unionSubtypes}" }
+                }
+                return hasFile
+            }
+
+            // Check all fields of the object
+            val hasFile = obj.fields.any { field ->
+                // Check field type
+                val isFile = when (val fieldType = field.type) {
+                    is Type.Simple -> {
+                        val typeNameCheck = hasFileType(fieldType.name)
+                        val descCheck = isFileFieldByDescription(field.description)
+                        val recursiveCheck = checkTypeRecursively(fieldType.name, visited)
+
+                        if (typeNameCheck || descCheck || recursiveCheck) {
+                            logger.debug { "Object $name field ${field.name}: type=$fieldType, hasFileTypeName=$typeNameCheck, hasFileDesc=$descCheck, recursive=$recursiveCheck" }
+                        }
+
+                        typeNameCheck || descCheck || recursiveCheck
+                    }
+
+                    is Type.Generic -> {
+                        // For Array<X>, check the element type
+                        if (fieldType.name == "Array" && fieldType.typeArguments.isNotEmpty()) {
+                            val elementType = fieldType.typeArguments[0]
+                            when (elementType) {
+                                is Type.Simple -> {
+                                    val typeNameCheck = hasFileType(elementType.name)
+                                    val recursiveCheck = checkTypeRecursively(elementType.name, visited)
+
+                                    if (typeNameCheck || recursiveCheck) {
+                                        logger.debug { "Object $name field ${field.name}: array element type=$elementType, hasFileTypeName=$typeNameCheck, recursive=$recursiveCheck" }
+                                    }
+
+                                    typeNameCheck || recursiveCheck
+                                }
+
+                                else -> false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                }
+                isFile
+            }
+
+            return hasFile
+        }
+
+        return checkTypeRecursively(typeName)
+    }
+
+    private fun determineHttpMethod(
+        methodName: String,
+        parameters: List<Method.Parameter>,
+        objects: List<Object>
+    ): String {
         val hasFileParameter = parameters.any { param ->
-            hasFileType(param.type.toString())
+            val typeString = param.type.toString()
+            val check1 = hasFileType(typeString)
+            val check2 = isFileFieldByDescription(param.description)
+
+            // Check nested types for file fields
+            val check3 = when (param.type) {
+                is Type.Simple -> hasNestedFileType(param.type.name, objects)
+                is Type.Generic -> {
+                    // For Array<X>, check the element type
+                    if (param.type.name == "Array" && param.type.typeArguments.isNotEmpty()) {
+                        val elementType = param.type.typeArguments[0]
+                        when (elementType) {
+                            is Type.Simple -> hasNestedFileType(elementType.name, objects)
+                            else -> false
+                        }
+                    } else {
+                        false
+                    }
+                }
+            }
+
+            val hasFile = check1 || check2 || check3
+
+            // Log specifically for sendPaidMedia
+            if (methodName == "sendPaidMedia") {
+                logger.info { "sendPaidMedia param ${param.name}: type=$typeString, hasFileType=$check1, hasFileDesc=$check2, hasNestedFile=$check3, total=$hasFile" }
+            }
+
+            hasFile
         }
         if (hasFileParameter) {
+            if (methodName == "sendPaidMedia") {
+                logger.info { "sendPaidMedia determined to need multipart/form-data" }
+            }
             return "POST"
         }
         return if (methodName.startsWith("get", ignoreCase = true)) "GET" else "POST"

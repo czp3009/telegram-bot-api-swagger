@@ -47,7 +47,7 @@ object SwaggerGenerator {
                     )
                 )
             ),
-            paths = generatePaths(methods),
+            paths = generatePaths(methods, objects),
             components = OpenAPIV3Components(
                 schemas = generateSchemas(objects)
             ),
@@ -130,19 +130,62 @@ object SwaggerGenerator {
         }
     }
 
-    private fun generatePaths(methods: List<Method>): Map<Path, OpenAPIV3PathItem> {
+    private fun generatePaths(methods: List<Method>, objects: List<Object>): Map<Path, OpenAPIV3PathItem> {
         return methods.associate { method ->
             Path("/${method.name}") to OpenAPIV3PathItem(
-                get = if (method.httpMethod == "GET") generateOperation(method) else null,
-                post = if (method.httpMethod == "POST") generateOperation(method) else null
+                get = if (method.httpMethod == "GET") generateOperation(method, objects) else null,
+                post = if (method.httpMethod == "POST") generateOperation(method, objects) else null
             )
         }
     }
 
-    private fun generateOperation(method: Method): OpenAPIV3Operation {
-        val hasFileParameter = method.parameters.any { param ->
-            DocumentParser.hasFileType(param.type.toString())
+    private fun generateOperation(method: Method, objects: List<Object>): OpenAPIV3Operation {
+        // Check if any parameter contains file types (including nested types)
+        var hasDirectFileUpload = false
+        var hasIndirectFileReference = false
+
+        method.parameters.forEach { param ->
+            val typeString = param.type.toString()
+
+            // Check for direct InputFile uploads
+            if (DocumentParser.isDirectInputFile(typeString)) {
+                hasDirectFileUpload = true
+                return@forEach
+            }
+
+            // Check for indirect file references (InputMedia, etc. that support attach://)
+            val hasFileDesc = param.description.contains("More information on Sending Files", ignoreCase = true) ||
+                    param.description.contains("attach://", ignoreCase = false)
+
+            val hasNestedFileRef = when (param.type) {
+                is DocumentParser.Type.Simple -> {
+                    !DocumentParser.isDirectInputFile(param.type.name) &&
+                            DocumentParser.hasNestedFileType(param.type.name, objects)
+                }
+
+                is DocumentParser.Type.Generic -> {
+                    if (param.type.name == "Array" && param.type.typeArguments.isNotEmpty()) {
+                        val elementType = param.type.typeArguments[0]
+                        when (elementType) {
+                            is DocumentParser.Type.Simple -> {
+                                !DocumentParser.isDirectInputFile(elementType.name) &&
+                                        DocumentParser.hasNestedFileType(elementType.name, objects)
+                            }
+
+                            else -> false
+                        }
+                    } else {
+                        false
+                    }
+                }
+            }
+
+            if (hasFileDesc || hasNestedFileRef) {
+                hasIndirectFileReference = true
+            }
         }
+
+        val hasFileParameter = hasDirectFileUpload || hasIndirectFileReference
 
         return OpenAPIV3Operation(
             summary = method.name,
@@ -150,7 +193,12 @@ object SwaggerGenerator {
             operationId = method.name,
             parameters = if (method.httpMethod == "GET") generateParameters(method.parameters) else null,
             requestBody = if (method.httpMethod == "POST" && method.parameters.isNotEmpty()) {
-                generateRequestBody(method.parameters, hasFileParameter)
+                // Only add additionalProperties for indirect file references (attach://)
+                generateRequestBody(
+                    method.parameters,
+                    hasFileParameter,
+                    needsAdditionalProperties = hasIndirectFileReference
+                )
             } else null,
             responses = generateResponses(method.returnType)
         )
@@ -170,7 +218,8 @@ object SwaggerGenerator {
 
     private fun generateRequestBody(
         parameters: List<Method.Parameter>,
-        hasFileParameter: Boolean
+        hasFileParameter: Boolean,
+        needsAdditionalProperties: Boolean
     ): OpenAPIV3RequestBody {
         val properties = parameters.associate { param ->
             param.name to convertParameterToSchema(param)
@@ -181,7 +230,21 @@ object SwaggerGenerator {
         val schema = OpenAPIV3Schema(
             type = OpenAPIV3Type.OBJECT,
             properties = properties.ifEmpty { null },
-            required = requiredFields.ifEmpty { null }
+            required = requiredFields.ifEmpty { null },
+            // For multipart/form-data with indirect file references (attach://), 
+            // allow additional properties to support dynamic attach://<file_attach_name> fields.
+            // This is necessary because Telegram Bot API allows sending files with arbitrary field names
+            // that are referenced in media arrays using "attach://<file_attach_name>" syntax.
+            // Direct InputFile uploads don't need this as they use fixed field names.
+            additionalProperties = if (needsAdditionalProperties) {
+                OpenAPIV3Schema(
+                    type = OpenAPIV3Type.STRING,
+                    format = "binary",
+                    description = "Additional file attachments referenced via attach://<file_attach_name> in media fields"
+                )
+            } else {
+                null
+            }
         )
 
         val contentType = if (hasFileParameter) MediaType("multipart/form-data") else MediaType("application/json")
