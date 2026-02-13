@@ -12,6 +12,10 @@ and outputs a complete OpenAPI 3.0 JSON specification.
 
 Run the generator on your platform:
 
+**Environment Variables:**
+
+- `HTTP_PROXY` / `HTTPS_PROXY`: Configure proxy for fetching documentation (e.g., `http://proxy:port`)
+
 ```bash
 # Linux
 ./gradlew :generator:runReleaseExecutableLinuxX64
@@ -42,11 +46,14 @@ The codebase is organized as a linear pipeline: `fetch` → `parse` → `generat
     - Union types with automatic discriminator detection
     - Extracts return types from HTML descriptions using regex patterns
     - Converts HTML to Markdown while preserving links
+  - Uses two-pass parsing: first pass collects all objects, second pass parses methods (which need object references)
 - **SwaggerGenerator.kt**: Generates OpenAPI 3.0 compliant JSON. Handles union types with `oneOf`, determines HTTP
   method (GET vs POST) based on file parameters, and includes error response schemas.
 - **Platform.kt**: Platform-specific implementations for file operations (Unix vs Windows directory creation with
   permissions).
-- **Model.kt**: Data models (`Type`, `Object`, `Method`, `Field`, `Parameter`) supporting nested arrays and union types.
+- **Data Models**: Defined inline within `DocumentParser.kt` as sealed classes (`Type`, `Object`, `Method`, `Field`,
+  `Parameter`)
+  supporting nested arrays and union types.
 
 ### Multiplatform Structure
 
