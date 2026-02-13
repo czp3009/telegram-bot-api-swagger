@@ -149,10 +149,9 @@ object SwaggerGenerator {
             description = method.description,
             operationId = method.name,
             parameters = if (method.httpMethod == "GET") generateParameters(method.parameters) else null,
-            requestBody = if (method.httpMethod == "POST") generateRequestBody(
-                method.parameters,
-                hasFileParameter
-            ) else null,
+            requestBody = if (method.httpMethod == "POST" && method.parameters.isNotEmpty()) {
+                generateRequestBody(method.parameters, hasFileParameter)
+            } else null,
             responses = generateResponses(method.returnType)
         )
     }
