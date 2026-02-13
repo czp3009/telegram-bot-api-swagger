@@ -54,5 +54,8 @@ replay_pid*
 .claude
 .ai
 
+# windows
+nul
+
 # temp
 /Telegram Bot API.html
