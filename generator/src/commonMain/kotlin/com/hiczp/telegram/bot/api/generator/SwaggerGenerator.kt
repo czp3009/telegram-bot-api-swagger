@@ -165,8 +165,7 @@ object SwaggerGenerator {
 
                 is DocumentParser.Type.Generic -> {
                     if (param.type.name == "Array" && param.type.typeArguments.isNotEmpty()) {
-                        val elementType = param.type.typeArguments[0]
-                        when (elementType) {
+                        when (val elementType = param.type.typeArguments[0]) {
                             is DocumentParser.Type.Simple -> {
                                 !DocumentParser.isDirectInputFile(elementType.name) &&
                                         DocumentParser.hasNestedFileType(elementType.name, objects)
@@ -176,6 +175,35 @@ object SwaggerGenerator {
                         }
                     } else {
                         false
+                    }
+                }
+
+                is DocumentParser.Type.Union -> {
+                    // For union types, check if any of the types contains file fields
+                    param.type.types.any { unionType ->
+                        when (unionType) {
+                            is DocumentParser.Type.Simple -> {
+                                !DocumentParser.isDirectInputFile(unionType.name) &&
+                                        DocumentParser.hasNestedFileType(unionType.name, objects)
+                            }
+
+                            is DocumentParser.Type.Generic -> {
+                                if (unionType.name == "Array" && unionType.typeArguments.isNotEmpty()) {
+                                    when (val elementType = unionType.typeArguments[0]) {
+                                        is DocumentParser.Type.Simple -> {
+                                            !DocumentParser.isDirectInputFile(elementType.name) &&
+                                                    DocumentParser.hasNestedFileType(elementType.name, objects)
+                                        }
+
+                                        else -> false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+
+                            is DocumentParser.Type.Union -> false // Nested unions are rare, skip for now
+                        }
                     }
                 }
             }
@@ -394,14 +422,8 @@ object SwaggerGenerator {
             is DocumentParser.Type.Simple -> {
                 val typeName = type.name
 
-                // Handle union types (e.g., "Integer or String", "Type1 or Type2")
-                splitUnionTypes(typeName, Regex("\\s+or\\s+", RegexOption.IGNORE_CASE))?.let { types ->
-                    return OpenAPIV3Schema(
-                        oneOf = types.map { singleType -> convertSingleTypeToSchema(singleType) }
-                    )
-                }
-
                 // Handle comma-separated types (e.g., "Type1, Type2, Type3 and Type4")
+                // This is kept for backward compatibility with any remaining string-based union types
                 splitUnionTypes(typeName, Regex(",|\\s+and\\s+", RegexOption.IGNORE_CASE))?.let { types ->
                     return OpenAPIV3Schema(
                         oneOf = types.map { singleType ->
@@ -423,6 +445,13 @@ object SwaggerGenerator {
                 } else {
                     OpenAPIV3Schema(type = OpenAPIV3Type.STRING)
                 }
+            }
+
+            is DocumentParser.Type.Union -> {
+                // Handle union types (e.g., Message or Boolean)
+                OpenAPIV3Schema(
+                    oneOf = type.types.map { unionType -> convertTypeToSchema(unionType) }
+                )
             }
         }
     }

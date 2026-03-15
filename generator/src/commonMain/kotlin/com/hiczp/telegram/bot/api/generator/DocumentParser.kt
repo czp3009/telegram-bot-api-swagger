@@ -33,6 +33,26 @@ object DocumentParser {
     private val REGEX_RETURNS_TRUE = Regex("returns?\\s+True", RegexOption.IGNORE_CASE)
     private val REGEX_TRUE_IS_RETURNED = Regex("True\\s+(?:is|on)\\s+(?:returned|success)", RegexOption.IGNORE_CASE)
     private val REGEX_RETURNS_FALSE = Regex("returns?\\s+False", RegexOption.IGNORE_CASE)
+
+    // Pattern for conditional return types: "X is returned, otherwise Y is returned" or "X, otherwise Y"
+    // This handles cases like: "if the edited message is not an inline message, the edited Message is returned, otherwise True is returned"
+    // Pattern 1: "the [adj] Type is returned, otherwise True/False [is returned]"
+    private val REGEX_CONDITIONAL_RETURN = Regex(
+        "(?:the\\s+)?(?:(?:edited|sent|stopped|created|deleted|forwarded)\\s+)?([A-Z]\\w+)\\s+is\\s+returned\\s*,\\s*otherwise\\s+(?:True|False|Boolean)(?:\\s+is\\s+returned)?",
+        RegexOption.IGNORE_CASE
+    )
+
+    // Pattern 2: "Returns Type on success, otherwise True/False"
+    private val REGEX_RETURNS_ON_SUCCESS_OTHERWISE = Regex(
+        "returns\\s+(?:an?\\s+)?([A-Z]\\w+)\\s+on\\s+success\\s*,\\s*otherwise\\s+(?:True|False|Boolean)",
+        RegexOption.IGNORE_CASE
+    )
+
+    // Pattern 3: "Type is returned, otherwise True/False" (simpler pattern without adjective)
+    private val REGEX_TYPE_RETURNED_OTHERWISE_BOOL = Regex(
+        "([A-Z]\\w+)\\s+is\\s+returned\\s*,\\s*otherwise\\s+(?:True|False|Boolean)",
+        RegexOption.IGNORE_CASE
+    )
     private val REGEX_RETURNS_STRING = Regex("returns?\\s+(?:a\\s+)?String", RegexOption.IGNORE_CASE)
     private val REGEX_STRING_IS_RETURNED = Regex("String\\s+is\\s+returned", RegexOption.IGNORE_CASE)
     private val REGEX_AS_STRING = Regex("as\\s+(?:a\\s+)?String", RegexOption.IGNORE_CASE)
@@ -500,8 +520,7 @@ object DocumentParser {
                     is Type.Generic -> {
                         // For Array<X>, check the element type
                         if (fieldType.name == "Array" && fieldType.typeArguments.isNotEmpty()) {
-                            val elementType = fieldType.typeArguments[0]
-                            when (elementType) {
+                            when (val elementType = fieldType.typeArguments[0]) {
                                 is Type.Simple -> {
                                     val typeNameCheck = hasFileType(elementType.name)
                                     val recursiveCheck = checkTypeRecursively(elementType.name, visited)
@@ -517,6 +536,27 @@ object DocumentParser {
                             }
                         } else {
                             false
+                        }
+                    }
+
+                    is Type.Union -> {
+                        // For union types, check if any of the types contains file fields
+                        fieldType.types.any { unionType ->
+                            when (unionType) {
+                                is Type.Simple -> checkTypeRecursively(unionType.name, visited)
+                                is Type.Generic -> {
+                                    if (unionType.name == "Array" && unionType.typeArguments.isNotEmpty()) {
+                                        when (val elementType = unionType.typeArguments[0]) {
+                                            is Type.Simple -> checkTypeRecursively(elementType.name, visited)
+                                            else -> false
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                }
+
+                                is Type.Union -> false // Nested unions are rare, skip for now
+                            }
                         }
                     }
                 }
@@ -545,13 +585,33 @@ object DocumentParser {
                 is Type.Generic -> {
                     // For Array<X>, check the element type
                     if (param.type.name == "Array" && param.type.typeArguments.isNotEmpty()) {
-                        val elementType = param.type.typeArguments[0]
-                        when (elementType) {
+                        when (val elementType = param.type.typeArguments[0]) {
                             is Type.Simple -> hasNestedFileType(elementType.name, objects)
                             else -> false
                         }
                     } else {
                         false
+                    }
+                }
+
+                is Type.Union -> {
+                    // For union types, check if any of the types contains file fields
+                    param.type.types.any { unionType ->
+                        when (unionType) {
+                            is Type.Simple -> hasNestedFileType(unionType.name, objects)
+                            is Type.Generic -> {
+                                if (unionType.name == "Array" && unionType.typeArguments.isNotEmpty()) {
+                                    when (val elementType = unionType.typeArguments[0]) {
+                                        is Type.Simple -> hasNestedFileType(elementType.name, objects)
+                                        else -> false
+                                    }
+                                } else {
+                                    false
+                                }
+                            }
+
+                            is Type.Union -> false // Nested unions are rare, skip for now
+                        }
                     }
                 }
             }
@@ -575,6 +635,28 @@ object DocumentParser {
     }
 
     private fun extractReturnType(description: String): String {
+        // First check for conditional return types (e.g., "Message is returned, otherwise True is returned")
+        // This must be checked before the simple Boolean check to avoid missing the primary type
+
+        // Pattern 1: "the [adj] Type is returned, otherwise True/False [is returned]"
+        REGEX_CONDITIONAL_RETURN.find(description)?.let {
+            val primaryType = it.groupValues[1]
+            // Return as union type (e.g., "Message or Boolean")
+            return "$primaryType or Boolean"
+        }
+
+        // Pattern 2: "Returns Type on success, otherwise True/False"
+        REGEX_RETURNS_ON_SUCCESS_OTHERWISE.find(description)?.let {
+            val primaryType = it.groupValues[1]
+            return "$primaryType or Boolean"
+        }
+
+        // Pattern 3: "Type is returned, otherwise True/False" (simpler pattern)
+        REGEX_TYPE_RETURNED_OTHERWISE_BOOL.find(description)?.let {
+            val primaryType = it.groupValues[1]
+            return "$primaryType or Boolean"
+        }
+
         // Check for Boolean type (True/False)
         if (REGEX_RETURNS_TRUE.containsMatchIn(description) ||
             REGEX_TRUE_IS_RETURNED.containsMatchIn(description) ||
@@ -671,7 +753,17 @@ object DocumentParser {
             override fun toString(): String = "$name<${typeArguments.joinToString(", ")}>"
         }
 
+        /**
+         * Represents a union type (e.g., "Message or Boolean").
+         * Used for methods that can return different types depending on conditions.
+         */
+        data class Union(val types: List<Type>) : Type() {
+            override fun toString(): String = types.joinToString(" or ") { it.toString() }
+        }
+
         companion object {
+            private val REGEX_UNION_TYPE = Regex("\\s+or\\s+", RegexOption.IGNORE_CASE)
+
             fun parse(typeString: String): Type {
                 // Normalize special boolean types
                 val normalizedType = when (val trimmed = typeString.trim()) {
@@ -679,12 +771,29 @@ object DocumentParser {
                     else -> trimmed
                 }
 
+                // Check for union types (e.g., "Message or Boolean")
+                if (REGEX_UNION_TYPE.containsMatchIn(normalizedType)) {
+                    val typeParts = normalizedType.split(REGEX_UNION_TYPE)
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+
+                    if (typeParts.size > 1) {
+                        // Recursively parse each part and create a Union type
+                        val parsedTypes = typeParts.map { parseSingleType(it) }
+                        return Union(parsedTypes)
+                    }
+                }
+
+                return parseSingleType(normalizedType)
+            }
+
+            private fun parseSingleType(typeString: String): Type {
                 // Count how many "Array of" prefixes exist
-                val arrayCount = REGEX_ARRAY_OF_PATTERN.findAll(normalizedType).count()
+                val arrayCount = REGEX_ARRAY_OF_PATTERN.findAll(typeString).count()
 
                 return if (arrayCount > 0) {
                     // Extract the element type (everything after the last "Array of")
-                    val elementType = normalizedType.substringAfterLast(TYPE_ARRAY_OF, "").trim()
+                    val elementType = typeString.substringAfterLast(TYPE_ARRAY_OF, "").trim()
 
                     if (elementType.isEmpty() || !elementType[0].isUpperCase()) {
                         error("Invalid array element type: '$elementType' in type string: '$typeString'")
@@ -698,10 +807,10 @@ object DocumentParser {
                     currentType
                 } else {
                     // Simple type
-                    if (normalizedType.isEmpty()) {
+                    if (typeString.isEmpty()) {
                         error("Empty type string")
                     }
-                    Simple(normalizedType)
+                    Simple(typeString)
                 }
             }
         }

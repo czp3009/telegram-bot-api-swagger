@@ -4,17 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Kotlin Multiplatform tool that automatically generates OpenAPI/Swagger specifications from the official
-Telegram Bot API documentation. It fetches HTML from `https://core.telegram.org/bots/api`, parses methods and objects,
-and outputs a complete OpenAPI 3.0 JSON specification.
+Kotlin Multiplatform tool that generates OpenAPI/Swagger specifications from the official Telegram Bot API
+documentation. Pipeline: fetch HTML → parse methods/objects → generate OpenAPI 3.0 JSON.
 
 ## Build Commands
-
-Run the generator on your platform:
-
-**Environment Variables:**
-
-- `HTTP_PROXY` / `HTTPS_PROXY`: Configure proxy for fetching documentation (e.g., `http://proxy:port`)
 
 ```bash
 # Linux
@@ -30,59 +23,66 @@ Run the generator on your platform:
 gradlew.bat :generator:runReleaseExecutableMingwX64
 ```
 
+**Environment Variables:**
+
+- `HTTP_PROXY` / `HTTPS_PROXY`: Configure proxy for fetching documentation (e.g., `http://proxy:port`)
+
 ## Architecture
 
-The codebase is organized as a linear pipeline: `fetch` → `parse` → `generate` → `write`.
+Linear pipeline: `fetch` → `parse` → `generate` → `write`
 
-### Core Components (in `generator/src/commonMain/kotlin/com/hiczp/telegram/bot/api/generator/`)
+### Core Components (`generator/src/commonMain/kotlin/com/hiczp/telegram/bot/api/generator/`)
 
-- **Main.kt**: Entry point orchestrating the pipeline. Uses coroutines (Dispatchers.Default) to execute the flow.
-- **DocumentFetcher.kt**: Fetches HTML from Telegram's API. Supports proxy configuration via `HTTP_PROXY`/`HTTPS_PROXY`
-  environment variables. Uses Ktor client with cURL engine and disables SSL verification.
-- **DocumentParser.kt**: Complex HTML parsing logic using ksoup. Parses:
-    - API version from "Recent changes" section
-    - API methods (lowercase names like `sendMessage`) with parameters
-    - API objects (uppercase names like `Message`) with fields
-    - Union types with automatic discriminator detection
-    - Extracts return types from HTML descriptions using regex patterns
-    - Converts HTML to Markdown while preserving links
-  - Uses two-pass parsing: first pass collects all objects, second pass parses methods (which need object references)
-- **SwaggerGenerator.kt**: Generates OpenAPI 3.0 compliant JSON. Handles union types with `oneOf`, determines HTTP
-  method (GET vs POST) based on file parameters, and includes error response schemas.
-- **Platform.kt**: Platform-specific implementations for file operations (Unix vs Windows directory creation with
-  permissions).
-- **Data Models**: Defined inline within `DocumentParser.kt` as sealed classes (`Type`, `Object`, `Method`, `Field`,
-  `Parameter`)
-  supporting nested arrays and union types.
+| File                    | Purpose                                                                 |
+|-------------------------|-------------------------------------------------------------------------|
+| **Main.kt**             | Entry point, orchestrates pipeline with coroutines                      |
+| **DocumentFetcher.kt**  | Fetches HTML via Ktor/cURL, supports proxy config                       |
+| **DocumentParser.kt**   | HTML parsing with ksoup, two-pass parsing (objects first, then methods) |
+| **SwaggerGenerator.kt** | Generates OpenAPI 3.0 JSON with `oneOf` for union types                 |
+| **Platform.kt**         | Expected functions for platform-specific file operations                |
 
-### Multiplatform Structure
+### Data Models (in DocumentParser.kt)
 
-Single common source code (`commonMain`) with platform-specific implementations for:
+- `Type` sealed class: `Simple` (e.g., "String") or `Generic` (e.g., "Array<Message>")
+- `Object`: name, description, fields, union type info
+- `Method`: name, description, parameters, return type, HTTP method
+- `Field`/`Parameter`: name, type, required flag, description
 
-- `unixMain`: Shared between Linux and macOS
-- `nativeMain`: Base for all native targets
-- Platform-specific `linuxX64Main`, `macosX64Main`, `macosArm64Main`, `mingwX64Main`
+### Multiplatform Source Sets
 
-### Output
+```
+commonMain (shared logic)
+    └── nativeMain (POSIX file operations)
+            ├── unixMain (Linux + macOS with mkdir permissions)
+            │     ├── linuxX64Main
+            │     ├── macosX64Main
+            │     └── macosArm64Main
+            └── mingwX64Main (Windows)
+```
 
-Generates `generator/swagger/telegram-bot-api.json` - OpenAPI 3.0 specification with all API methods, data objects,
-proper endpoints, parameters, and response schemas.
+## Key Implementation Details
 
-## Key Patterns
+- **Two-pass parsing**: Objects parsed first because methods need object references for HTTP method detection
+- **Union type detection**: Objects with "can be one of" in description become `oneOf` schemas with discriminators
+- **Discriminator detection**: Fields with "always \"value\"" or "must be *value*" patterns become discriminators
+- **HTTP method logic**: Methods with `InputFile`/`InputMedia` parameters → POST; methods starting with "get" → GET;
+  else POST
+- **Nested file detection**: Recursively checks union subtypes for file fields to determine multipart/form-data
+- **Return type extraction**: Multiple regex patterns match "Returns X on success", "X is returned", etc.
+- **HTML to Markdown**: DOM traversal converts `<a>` to `[text](url)`, preserves links with base URL
 
-- **HTML Parsing**: Uses ksoup (Kotlin Jsoup wrapper) for robust DOM manipulation, not fragile regex. Table parsing has
-  flexible header detection.
-- **Type System**: Supports nested arrays (`Array<Array<Message>>`), union types with discriminators, and complex return
-  type extraction.
-- **Union Types**: Automatically detected from field descriptions (e.g., "This object contains one of the following
-  types"). Discriminator fields are identified from descriptions mentioning "This field determines which of the
-  following..." patterns.
-- **HTTP Method Detection**: Uses `file` parameters to determine POST vs GET for API methods.
-- **Error Handling**: Comprehensive logging with kotlinLogging throughout the pipeline.
+## Dependencies
+
+- `ksoup`: HTML parsing (Kotlin Jsoup wrapper)
+- `ktor-client-curl`: HTTP client with native cURL engine
+- `kotlinx-openapi-bindings`: OpenAPI 3.0 serialization
+- `kotlin-logging`: Logging abstraction
+
+## Output
+
+`generator/swagger/telegram-bot-api.json` - Complete OpenAPI 3.0 spec with all methods, objects, and schemas.
 
 ## CI/CD
 
-GitHub Actions workflow (`.github/workflows/generate-swagger.yml`) runs daily at 00:05 UTC, or on manual trigger. Uses
-Ubuntu with JDK 21 (GraalVM), caches Gradle and Kotlin Native builds, extracts API version from generated JSON, and
-creates tagged releases (`v7.2`, etc.) when the version changes. Releases attach the generated `telegram-bot-api.json`
-file.
+GitHub Actions runs daily at 00:05 UTC on Ubuntu with JDK 21 (GraalVM). Extracts API version from generated JSON and
+creates tagged releases when version changes.
