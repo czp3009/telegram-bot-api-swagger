@@ -1,3 +1,6 @@
+@file:OptIn(ExperimentalKotlinGradlePluginApi::class)
+
+import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 
 plugins {
@@ -7,6 +10,11 @@ plugins {
 kotlin {
     applyDefaultHierarchyTemplate()
 
+    jvm {
+        mainRun {
+            mainClass.set("com.hiczp.telegram.bot.api.generator.MainKt")
+        }
+    }
     mingwX64()
     linuxX64()
     macosX64()
@@ -19,14 +27,25 @@ kotlin {
     }
 
     sourceSets {
-        val commonMain by getting {
+        commonMain {
             dependencies {
                 implementation(libs.kotlinx.coroutines.core)
+                implementation(libs.kotlinx.serialization.json)
                 implementation(libs.ktor.client.core)
-                implementation(libs.ktor.client.curl)
                 implementation(libs.ksoup)
                 implementation(libs.openapi.bindings)
                 implementation(libs.kotlinLogging)
+            }
+        }
+        jvmMain {
+            dependencies {
+                implementation(libs.ktor.client.cio)
+                implementation(libs.logback.classic)
+            }
+        }
+        nativeMain {
+            dependencies {
+                implementation(libs.ktor.client.curl)
             }
         }
         val nativeMain by getting
