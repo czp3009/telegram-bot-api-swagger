@@ -9,26 +9,17 @@ import kotlinx.serialization.json.JsonPrimitive
 private val logger = KotlinLogging.logger {}
 
 object SwaggerGenerator {
-    // Store union type information for reference during schema conversion
-    private val unionTypes = mutableMapOf<String, List<String>>()
-
     // Store discriminator information: typeName -> (fieldName, mapping of subtype -> value)
     private val discriminatorInfo = mutableMapOf<String, Pair<String, Map<String, String>>>()
 
     fun generate(methods: List<Method>, objects: List<Object>, apiVersion: String = "1.0.0"): String {
         logger.info { "Generating OpenAPI specification for ${methods.size} methods and ${objects.size} objects" }
 
-        // Build union type map
-        unionTypes.clear()
-        objects.filter { it.isUnionType }.forEach { obj ->
-            unionTypes[obj.name] = obj.unionSubtypes
-        }
-
         // Build discriminator info map by examining union subtypes
         discriminatorInfo.clear()
         buildDiscriminatorInfo(objects)
 
-        val openApi = OpenAPIV3Model(
+        val openApi = OpenAPIV30Model(
             openapi = "3.0.0",
             info = InfoObject(
                 title = "Telegram Bot API",
@@ -48,7 +39,7 @@ object SwaggerGenerator {
                 )
             ),
             paths = generatePaths(methods, objects),
-            components = OpenAPIV3Components(
+            components = OpenAPIV30Components(
                 schemas = generateSchemas(objects)
             ),
             externalDocs = ExternalDocumentation(
@@ -90,8 +81,17 @@ object SwaggerGenerator {
 
         // For each union type, examine its subtypes
         // IMPORTANT: Only process union types - skip non-union types
-        unionTypes.forEach { (unionTypeName, subtypes) ->
+        objects.filter { it.isUnionType }.forEach { unionType ->
+            val unionTypeName = unionType.name
+            val subtypes = unionType.unionSubtypes
             logger.debug { "Examining union type $unionTypeName with subtypes: $subtypes" }
+
+            if (unionType.unionAdditionalTypes.isNotEmpty()) {
+                logger.debug {
+                    "Skipping discriminator for $unionTypeName because it has non-object union branches: ${unionType.unionAdditionalTypes}"
+                }
+                return@forEach
+            }
 
             // Collect discriminator candidates from all subtypes
             val discriminatorCandidates =
@@ -122,24 +122,31 @@ object SwaggerGenerator {
             // Find a field that has values for all subtypes
             discriminatorCandidates.forEach { (fieldName, mapping) ->
                 if (mapping.size == subtypes.size) {
-                    // All subtypes have this field with constant values
-                    discriminatorInfo[unionTypeName] = fieldName to mapping
-                    logger.info { "Added discriminator for $unionTypeName: field=$fieldName, mapping=$mapping" }
+                    val discriminatorValues = mapping.values
+                    if (discriminatorValues.toSet().size == discriminatorValues.size) {
+                        // All subtypes have this field with unique constant values.
+                        discriminatorInfo[unionTypeName] = fieldName to mapping
+                        logger.info { "Added discriminator for $unionTypeName: field=$fieldName, mapping=$mapping" }
+                    } else {
+                        logger.warn {
+                            "Skipping discriminator for $unionTypeName: field=$fieldName has duplicate values in mapping=$mapping"
+                        }
+                    }
                 }
             }
         }
     }
 
-    private fun generatePaths(methods: List<Method>, objects: List<Object>): Map<Path, OpenAPIV3PathItem> {
+    private fun generatePaths(methods: List<Method>, objects: List<Object>): Map<Path, OpenAPIV30PathItem> {
         return methods.associate { method ->
-            Path("/${method.name}") to OpenAPIV3PathItem(
+            Path("/${method.name}") to OpenAPIV30PathItem(
                 get = if (method.httpMethod == "GET") generateOperation(method, objects) else null,
                 post = if (method.httpMethod == "POST") generateOperation(method, objects) else null
             )
         }
     }
 
-    private fun generateOperation(method: Method, objects: List<Object>): OpenAPIV3Operation {
+    private fun generateOperation(method: Method, objects: List<Object>): OpenAPIV30Operation {
         // Check if any parameter contains file types (including nested types)
         var hasDirectFileUpload = false
         var hasIndirectFileReference = false
@@ -215,7 +222,7 @@ object SwaggerGenerator {
 
         val hasFileParameter = hasDirectFileUpload || hasIndirectFileReference
 
-        return OpenAPIV3Operation(
+        return OpenAPIV30Operation(
             summary = method.name,
             description = method.description,
             operationId = method.name,
@@ -232,11 +239,11 @@ object SwaggerGenerator {
         )
     }
 
-    private fun generateParameters(parameters: List<Method.Parameter>): List<OpenAPIV3ParameterOrReference> {
+    private fun generateParameters(parameters: List<Method.Parameter>): List<OpenAPIV30ParameterOrReference> {
         return parameters.map { param ->
-            OpenAPIV3Parameter(
+            OpenAPIV30Parameter(
                 name = param.name,
-                `in` = OpenAPIV3ParameterLocation.QUERY,
+                `in` = OpenAPIV30ParameterLocation.QUERY,
                 description = param.description,
                 required = param.required,
                 schema = convertTypeToSchema(param.type)
@@ -248,15 +255,15 @@ object SwaggerGenerator {
         parameters: List<Method.Parameter>,
         hasFileParameter: Boolean,
         needsAdditionalProperties: Boolean
-    ): OpenAPIV3RequestBody {
+    ): OpenAPIV30RequestBody {
         val properties = parameters.associate { param ->
             param.name to convertParameterToSchema(param)
         }
 
         val requiredFields = parameters.filter { it.required }.map { it.name }
 
-        val schema = OpenAPIV3Schema(
-            type = OpenAPIV3Type.OBJECT,
+        val schema = OpenAPIV30Schema(
+            type = schemaType(OpenAPIV30Type.OBJECT),
             properties = properties.ifEmpty { null },
             required = requiredFields.ifEmpty { null },
             // For multipart/form-data with indirect file references (attach://), 
@@ -265,8 +272,8 @@ object SwaggerGenerator {
             // that are referenced in media arrays using "attach://<file_attach_name>" syntax.
             // Direct InputFile uploads don't need this as they use fixed field names.
             additionalProperties = if (needsAdditionalProperties) {
-                OpenAPIV3Schema(
-                    type = OpenAPIV3Type.STRING,
+                OpenAPIV30Schema(
+                    type = schemaType(OpenAPIV30Type.STRING),
                     format = "binary",
                     description = "Additional file attachments referenced via attach://<file_attach_name> in media fields"
                 )
@@ -277,9 +284,9 @@ object SwaggerGenerator {
 
         val contentType = if (hasFileParameter) MediaType("multipart/form-data") else MediaType("application/json")
 
-        return OpenAPIV3RequestBody(
+        return OpenAPIV30RequestBody(
             content = mapOf(
-                contentType to OpenAPIV3MediaType(
+                contentType to OpenAPIV30MediaType(
                     schema = schema
                 )
             ),
@@ -287,21 +294,21 @@ object SwaggerGenerator {
         )
     }
 
-    private fun generateResponses(returnType: DocumentParser.Type): Map<StatusCode, OpenAPIV3ResponseOrReference> {
-        val successSchema = OpenAPIV3Schema(
-            type = OpenAPIV3Type.OBJECT,
+    private fun generateResponses(returnType: DocumentParser.Type): Map<StatusCode, OpenAPIV30ResponseOrReference> {
+        val successSchema = OpenAPIV30Schema(
+            type = schemaType(OpenAPIV30Type.OBJECT),
             properties = mapOf(
-                "ok" to OpenAPIV3Schema(type = OpenAPIV3Type.BOOLEAN),
+                "ok" to OpenAPIV30Schema(type = schemaType(OpenAPIV30Type.BOOLEAN)),
                 "result" to convertTypeToSchema(returnType)
             ),
             required = listOf("ok", "result")
         )
 
         return mapOf(
-            StatusCode("200") to OpenAPIV3Response(
+            StatusCode("200") to OpenAPIV30Response(
                 description = "Successful response",
                 content = mapOf(
-                    MediaType("application/json") to OpenAPIV3MediaType(
+                    MediaType("application/json") to OpenAPIV30MediaType(
                         schema = successSchema
                     )
                 )
@@ -309,7 +316,7 @@ object SwaggerGenerator {
         )
     }
 
-    private fun generateSchemas(objects: List<Object>): Map<String, OpenAPIV3SchemaOrReference> {
+    private fun generateSchemas(objects: List<Object>): Map<String, OpenAPIV30SchemaOrReference> {
         val schemas = objects.associate { obj ->
             val schema = if (obj.isUnionType) {
                 // For union types, create a schema with oneOf pointing to subtypes
@@ -321,25 +328,27 @@ object SwaggerGenerator {
                         value to "#/components/schemas/$subtype"
                     }.toMap()
 
-                    OpenAPIV3Discriminator(
+                    OpenAPIV30Discriminator(
                         propertyName = fieldName,
                         mapping = reversedMapping
                     )
                 }
 
-                val oneOfList = obj.unionSubtypes.map { subtype ->
-                    OpenAPIV3Reference(ref = Ref("#/components/schemas/$subtype"))
+                val oneOfList = obj.unionAdditionalTypes.map { type ->
+                    convertTypeToSchema(type)
+                } + obj.unionSubtypes.map { subtype ->
+                    OpenAPIV30Reference(ref = Ref("#/components/schemas/$subtype"))
                 }
-                
-                OpenAPIV3Schema(
+
+                OpenAPIV30Schema(
                     description = obj.description.ifEmpty { null },
                     oneOf = oneOfList.ifEmpty { null },
                     discriminator = discriminator
                 )
             } else {
                 // For regular types, create a normal object schema
-                OpenAPIV3Schema(
-                    type = OpenAPIV3Type.OBJECT,
+                OpenAPIV30Schema(
+                    type = schemaType(OpenAPIV30Type.OBJECT),
                     description = obj.description.ifEmpty { null },
                     properties = obj.fields.associate { field ->
                         field.name to convertFieldToSchema(field)
@@ -351,24 +360,24 @@ object SwaggerGenerator {
         }
 
         // Add Error schema for error responses
-        val errorSchema = OpenAPIV3Schema(
-            type = OpenAPIV3Type.OBJECT,
+        val errorSchema = OpenAPIV30Schema(
+            type = schemaType(OpenAPIV30Type.OBJECT),
             description = "Error response returned when a request fails",
             properties = mapOf(
-                "ok" to OpenAPIV3Schema(
-                    type = OpenAPIV3Type.BOOLEAN,
+                "ok" to OpenAPIV30Schema(
+                    type = schemaType(OpenAPIV30Type.BOOLEAN),
                     description = "Always false for error responses"
                 ),
-                "error_code" to OpenAPIV3Schema(
-                    type = OpenAPIV3Type.INTEGER,
+                "error_code" to OpenAPIV30Schema(
+                    type = schemaType(OpenAPIV30Type.INTEGER),
                     format = "int64",
                     description = "Error code"
                 ),
-                "description" to OpenAPIV3Schema(
-                    type = OpenAPIV3Type.STRING,
+                "description" to OpenAPIV30Schema(
+                    type = schemaType(OpenAPIV30Type.STRING),
                     description = "Human-readable description of the error"
                 ),
-                "parameters" to OpenAPIV3Reference(
+                "parameters" to OpenAPIV30Reference(
                     ref = Ref("#/components/schemas/ResponseParameters")
                 )
             ),
@@ -378,11 +387,11 @@ object SwaggerGenerator {
         return schemas + ("Error" to errorSchema)
     }
 
-    private fun convertParameterToSchema(param: Method.Parameter): OpenAPIV3SchemaOrReference {
+    private fun convertParameterToSchema(param: Method.Parameter): OpenAPIV30SchemaOrReference {
         return convertToSchemaWithDescription(param.type, param.description)
     }
 
-    private fun convertFieldToSchema(field: Object.Field): OpenAPIV3SchemaOrReference {
+    private fun convertFieldToSchema(field: Object.Field): OpenAPIV30SchemaOrReference {
         return convertToSchemaWithDescription(field.type, field.description)
     }
 
@@ -393,9 +402,9 @@ object SwaggerGenerator {
     private fun convertToSchemaWithDescription(
         type: DocumentParser.Type,
         description: String
-    ): OpenAPIV3SchemaOrReference {
+    ): OpenAPIV30SchemaOrReference {
         return when (val baseSchema = convertTypeToSchema(type)) {
-            is OpenAPIV3Schema -> {
+            is OpenAPIV30Schema -> {
                 if (description.isNotEmpty()) {
                     baseSchema.copy(description = description)
                 } else {
@@ -403,10 +412,10 @@ object SwaggerGenerator {
                 }
             }
 
-            is OpenAPIV3Reference -> {
+            is OpenAPIV30Reference -> {
                 // For references with descriptions, wrap in allOf to preserve the description
                 if (description.isNotEmpty()) {
-                    OpenAPIV3Schema(
+                    OpenAPIV30Schema(
                         allOf = listOf(baseSchema),
                         description = description
                     )
@@ -417,7 +426,7 @@ object SwaggerGenerator {
         }
     }
 
-    private fun convertTypeToSchema(type: DocumentParser.Type): OpenAPIV3SchemaOrReference {
+    private fun convertTypeToSchema(type: DocumentParser.Type): OpenAPIV30SchemaOrReference {
         return when (type) {
             is DocumentParser.Type.Simple -> {
                 val typeName = type.name
@@ -425,9 +434,9 @@ object SwaggerGenerator {
                 // Handle comma-separated types (e.g., "Type1, Type2, Type3 and Type4")
                 // This is kept for backward compatibility with any remaining string-based union types
                 splitUnionTypes(typeName, Regex(",|\\s+and\\s+", RegexOption.IGNORE_CASE))?.let { types ->
-                    return OpenAPIV3Schema(
+                    return OpenAPIV30Schema(
                         oneOf = types.map { singleType ->
-                            OpenAPIV3Reference(ref = Ref("#/components/schemas/$singleType"))
+                            OpenAPIV30Reference(ref = Ref("#/components/schemas/$singleType"))
                         }
                     )
                 }
@@ -438,18 +447,18 @@ object SwaggerGenerator {
 
             is DocumentParser.Type.Generic -> {
                 if (type.name == "Array" && type.typeArguments.size == 1) {
-                    OpenAPIV3Schema(
-                        type = OpenAPIV3Type.ARRAY,
+                    OpenAPIV30Schema(
+                        type = schemaType(OpenAPIV30Type.ARRAY),
                         items = convertTypeToSchema(type.typeArguments[0])
                     )
                 } else {
-                    OpenAPIV3Schema(type = OpenAPIV3Type.STRING)
+                    OpenAPIV30Schema(type = schemaType(OpenAPIV30Type.STRING))
                 }
             }
 
             is DocumentParser.Type.Union -> {
                 // Handle union types (e.g., Message or Boolean)
-                OpenAPIV3Schema(
+                OpenAPIV30Schema(
                     oneOf = type.types.map { unionType -> convertTypeToSchema(unionType) }
                 )
             }
@@ -472,17 +481,21 @@ object SwaggerGenerator {
         return if (types.size > 1) types else null
     }
 
-    private fun convertSingleTypeToSchema(typeName: String): OpenAPIV3SchemaOrReference {
+    private fun convertSingleTypeToSchema(typeName: String): OpenAPIV30SchemaOrReference {
         return when (typeName) {
-            "String" -> OpenAPIV3Schema(type = OpenAPIV3Type.STRING)
-            "Integer", "Int" -> OpenAPIV3Schema(type = OpenAPIV3Type.INTEGER, format = "int64")
-            "Boolean" -> OpenAPIV3Schema(type = OpenAPIV3Type.BOOLEAN)
-            "Float", "Double" -> OpenAPIV3Schema(type = OpenAPIV3Type.NUMBER, format = "double")
+            "String" -> OpenAPIV30Schema(type = schemaType(OpenAPIV30Type.STRING))
+            "Integer", "Int" -> OpenAPIV30Schema(type = schemaType(OpenAPIV30Type.INTEGER), format = "int64")
+            "Boolean" -> OpenAPIV30Schema(type = schemaType(OpenAPIV30Type.BOOLEAN))
+            "Float", "Double" -> OpenAPIV30Schema(type = schemaType(OpenAPIV30Type.NUMBER), format = "double")
             else -> {
                 // Always return a reference for custom types (including union types)
                 // The union type definition itself will have oneOf in the schemas section
-                OpenAPIV3Reference(ref = Ref("#/components/schemas/$typeName"))
+                OpenAPIV30Reference(ref = Ref("#/components/schemas/$typeName"))
             }
         }
+    }
+
+    private fun schemaType(type: OpenAPIV30Type): OpenAPIV30SingleType {
+        return OpenAPIV30SingleType(type)
     }
 }

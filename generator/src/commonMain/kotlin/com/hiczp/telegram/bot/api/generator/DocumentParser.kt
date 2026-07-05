@@ -230,17 +230,29 @@ object DocumentParser {
         // 2. "should be one of"
         // 3. "It can be one of"
         // 4. "the following X scopes are supported"
-        // 5. "the following X types"
-        // 6. "currently support results of the following X types"
+        // 5. "the following X types" / "the following types"
+        // 6. "currently support results of the following X types" / "currently support the following types"
         val isUnionType = content.description.contains("can be one of", ignoreCase = true) ||
                 content.description.contains("should be one of", ignoreCase = true) ||
                 content.description.contains("It can be one of", ignoreCase = true) ||
                 content.description.contains(Regex("the following \\d+ \\w+ are supported", RegexOption.IGNORE_CASE)) ||
-                content.description.contains(Regex("the following \\d+ types", RegexOption.IGNORE_CASE)) ||
-                content.description.contains(Regex("support.*the following \\d+ types", RegexOption.IGNORE_CASE))
+                content.description.contains(
+                    Regex("the following (?:\\d+\\s+)?(?:\\w+\\s+)?types", RegexOption.IGNORE_CASE)
+                ) ||
+                content.description.contains(
+                    Regex("support.*the following (?:\\d+\\s+)?(?:\\w+\\s+)?types", RegexOption.IGNORE_CASE)
+                ) ||
+                content.description.contains(
+                    Regex("any of the following (?:\\w+\\s+)?types", RegexOption.IGNORE_CASE)
+                )
         
         val unionSubtypes = if (isUnionType) {
             extractUnionSubtypes(content.elements)
+        } else {
+            emptyList()
+        }
+        val unionAdditionalTypes = if (isUnionType) {
+            extractAdditionalUnionTypes(content.description)
         } else {
             emptyList()
         }
@@ -282,7 +294,7 @@ object DocumentParser {
             }
         }
 
-        return Object(name, content.description, fields, isUnionType, unionSubtypes)
+        return Object(name, content.description, fields, isUnionType, unionSubtypes, unionAdditionalTypes)
     }
 
     private fun extractUnionSubtypes(elements: List<Element>): List<String> {
@@ -324,6 +336,22 @@ object DocumentParser {
         return subtypes
     }
 
+    private fun extractAdditionalUnionTypes(description: String): List<Type> {
+        val additionalTypes = mutableListOf<Type>()
+
+        if (description.contains(Regex("""\bString\b""")) &&
+            description.contains(Regex("""\beither\b|\bor\b""", RegexOption.IGNORE_CASE))
+        ) {
+            additionalTypes.add(Type.Simple("String"))
+        }
+
+        Regex("""Array of ([A-Z]\w+)""").findAll(description).forEach { match ->
+            additionalTypes.add(Type.Generic("Array", listOf(Type.Simple(match.groupValues[1]))))
+        }
+
+        return additionalTypes.distinct()
+    }
+
     /**
      * Check if a field description indicates it's optional.
      * Handles various formats like "Optional.", "*Optional*.", "Optional ", etc.
@@ -356,14 +384,20 @@ object DocumentParser {
                                 var url = child.attr("href")
                                 val text = child.text()
 
-                                // Convert relative URLs to absolute URLs
-                                url = when {
-                                    url.startsWith("#") -> "$baseUrl$url"
-                                    url.startsWith("/") -> "https://core.telegram.org$url"
-                                    else -> url
-                                }
+                                if (text.isNotBlank()) {
+                                    // Convert relative URLs to absolute URLs
+                                    url = when {
+                                        url.startsWith("#") -> "$baseUrl$url"
+                                        url.startsWith("/") -> "https://core.telegram.org$url"
+                                        else -> url
+                                    }
 
-                                result.append("[$text]($url)")
+                                    if (text == url) {
+                                        result.append(text)
+                                    } else {
+                                        result.append("[$text]($url)")
+                                    }
+                                }
                             }
 
                             "em", "i" -> {
@@ -618,17 +652,9 @@ object DocumentParser {
 
             val hasFile = check1 || check2 || check3
 
-            // Log specifically for sendPaidMedia
-            if (methodName == "sendPaidMedia") {
-                logger.info { "sendPaidMedia param ${param.name}: type=$typeString, hasFileType=$check1, hasFileDesc=$check2, hasNestedFile=$check3, total=$hasFile" }
-            }
-
             hasFile
         }
         if (hasFileParameter) {
-            if (methodName == "sendPaidMedia") {
-                logger.info { "sendPaidMedia determined to need multipart/form-data" }
-            }
             return "POST"
         }
         return if (methodName.startsWith("get", ignoreCase = true)) "GET" else "POST"
@@ -822,6 +848,7 @@ object DocumentParser {
         val fields: List<Field>,
         val isUnionType: Boolean = false,
         val unionSubtypes: List<String> = emptyList(),
+        val unionAdditionalTypes: List<Type> = emptyList(),
     ) {
         data class Field(
             val name: String,
